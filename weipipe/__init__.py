@@ -1,12 +1,4 @@
-# Copyright 2019 Kakao Brain
-#
-# Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
-#
-# This source code is licensed under the BSD license found in the
-# LICENSE file in the root directory of this source tree.
-"""A Pipe implementation in PyTorch."""
-from .checkpoint import is_checkpointing, is_recomputing
-from .weipipe import WeiPipe, WithDevice
-from .microbatch import NoChunk
+"""A WeiPipe implementation in PyTorch."""
+from .weipipe import WeiPipe
 
-__all__ = ["Pipe", "is_checkpointing", "is_recomputing"]
+__all__ = ["WeiPipe"]
