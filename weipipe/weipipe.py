@@ -44,6 +44,7 @@ class WeiPipe(nn.Module):
         self.flattened_model = [module_to_tensor (self.model), None]
         self.flattened_model[1] = torch.empty (len(self.flattened_model[0])).cuda()
         self.state = - self.rank
+        self.loss_fn = lambda x : x
 
     def forward (self, x):
         self.activations.append (x)
@@ -51,14 +52,18 @@ class WeiPipe(nn.Module):
             with torch.no_grad():
                 self.forward_step (self.activations[-1])
         
-        loss_fn = None
-        loss  = loss_fn(self.activations.pop())
+        loss  = self.loss_fn(self.activations.pop())
 
         self.backward(loss)
         print(self.activations)
         
     def backward(self, x):
-        pass
+        x = self.activations.pop().detach()
+        self.forward_step (x)
+        y = self.activations.pop()
+        loss = self.loss_fn(y)
+        loss.backward()
+    
 
     def forward_step(self, x):
         if self.state >= 0 and self.state < self.world_size:
@@ -84,14 +89,30 @@ class WeiPipe(nn.Module):
     def backward_step(self, dx):
         pass
 
-if __name__ == "__main__":
-    mlp = nn.Sequential (
-        nn.Linear(2,3),
-        nn.Linear(3,2)
-    )
-    x = torch.tensor([[1.0, 2.0]])
-    t = module_to_tensor(mlp)
+from torch.utils.data import Dataset, DataLoader
+class MyData(Dataset):
+    def __init__(self):
+        n_samples = 5
+        seq_len = 10
+        input = torch.randint(0, 10, (n_samples, seq_len + 1))
+        enc_input = input[:, :-1].long()
+        targets = input[:, 1:].long()
+        self.data = list(zip (enc_input, targets))
+    def __getitem__(self, index):
+        return self.data[index]
+    
+    def __len__(self):
+        return len(self.data)
 
-    print(mlp(x))
-    tensor_to_module (t, mlp)
-    print(mlp(x))
+    
+class MyDataLoader(DataLoader):
+    def __init__(self):
+        pass
+
+
+if __name__ == "__main__":
+    torch.manual_seed (1234)
+    d = MyData()
+    dl = DataLoader (d, batch_size=2)
+    for x in dl:
+        print(x)
