@@ -292,7 +292,6 @@ class WeiPipe:
     def update(self):
         tensor_to_grad(self.buffers["grad"].send / self.world_size, self.model_fp32)
         self.buffers["grad"].send.zero_()
-        self.buffers["grad"].recv.zero_()
         nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
         self.optimizer.step()
         self.optimizer.zero_grad()
