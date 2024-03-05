@@ -9,13 +9,15 @@ import tempfile
 import torch.distributed as dist
 import argparse
 from tinystories import Task
-from utils import get_lr, loss_fn
+from utils import get_lr, print_rank0
+from model import ModelArgs
 
 torch.manual_seed(1234)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--local_rank", default=-1, type=int)
 parser.add_argument("--rank", default=-1, type=int)
+parser.add_argument("--batch_size", default=64, type=int)
 args = parser.parse_args()
 
 
@@ -37,26 +39,31 @@ def init_process_group():
     torch.cuda.set_device(dist.get_rank())
 
 
-def print_rank0(x):
-    if dist.get_rank() == 0:
-        print(x)
-
-
 init_process_group()
 
-model = WeiPipe()
-max_seq_len = 128
+model_args = dict(
+    dim=288,
+    n_heads=6,
+    n_kv_heads=None,
+    vocab_size=32000,
+    multiple_of=32,
+    max_seq_len=128,
+    dropout=0.0,
+    n_layers=6,
+)
+model = WeiPipe(ModelArgs(**model_args))
+
 
 learning_rate = 5e-4
-gradient_accumulation_steps = 1
-batch_size = 32
+gradient_accumulation_steps = 4
+batch_size = args.batch_size
 
 eval_interval = 100
 
 iter_batches = partial(
     Task.iter_batches,
     batch_size=batch_size,
-    max_seq_len=max_seq_len,
+    max_seq_len=model_args["max_seq_len"],
     device="cuda",
     num_workers=0,
 )
@@ -88,7 +95,6 @@ if __name__ == "__main__":
     X, Y = next(train_batch_iter)
 
     iter_num = 0
-    tokens_per_iter = gradient_accumulation_steps * batch_size * max_seq_len
     start = time.time()
     while True:
         lr = get_lr(learning_rate, iter_num)
@@ -104,13 +110,10 @@ if __name__ == "__main__":
                 print(f"saving checkpoint to {out_dir}")
                 transformer.export(os.path.join(out_dir, "model.bin"))
 
-        for i in range(gradient_accumulation_steps):
-            loss = model.forward_backward_step(X, Y, first=i == 0)
-            X, Y = next(train_batch_iter)
+        loss = model.forward_backward_step(X, Y)
+        X, Y = next(train_batch_iter)
 
-        model.update()
-
-        if iter_num % 1 == 0:
+        if iter_num % 20 == 0:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
             lossf = loss.item()
             print_rank0(
