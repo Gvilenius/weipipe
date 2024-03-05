@@ -100,15 +100,15 @@ if __name__ == "__main__":
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
 
-        if (iter_num + 1) % eval_interval == 0:
-            transformer = model.get_full_transformer()
+        # if (iter_num + 1) % eval_interval == 0:
+        #     transformer = model.get_full_transformer()
 
-            if dist.get_rank() == 0:
-                loss = estimate_loss(transformer)
-                print(f" loss eval is {loss}")
-                out_dir = "out"
-                print(f"saving checkpoint to {out_dir}")
-                transformer.export(os.path.join(out_dir, "model.bin"))
+        #     if dist.get_rank() == 0:
+        #         loss = estimate_loss(transformer)
+        #         print(f" loss eval is {loss}")
+        #         out_dir = "out"
+        #         print(f"saving checkpoint to {out_dir}")
+        #         transformer.export(os.path.join(out_dir, "model.bin"))
 
         loss = model.forward_backward_step(X, Y)
         X, Y = next(train_batch_iter)
