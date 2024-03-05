@@ -32,7 +32,7 @@ class Buffer:
     def pingpong(self):
         self.index = 1 - self.index
         self.send = self.buffers[self.index]
-        self.recv = self.buffers[self.index]
+        self.recv = self.buffers[1 - self.index]
 
 
 class WeiPipe:
@@ -90,8 +90,8 @@ class WeiPipe:
         return [send_op, recv_op]
 
     def weight_grad_flow(self):
-        model_to_tensor(self.models[0], self.buffers["weight0"].send)
-        model_to_tensor(self.models[1], self.buffers["weight1"].send)
+        for i in range(2):
+            model_to_tensor(self.models[i], self.buffers[f"weight{i}"].send)
 
         grad_flow_op = self.flow_op("grad")
         weight_flow_op = self.flow_op("weight0") + self.flow_op("weight1")
@@ -100,8 +100,8 @@ class WeiPipe:
             req.wait()
         self.buffers["grad"].pingpong()
 
-        tensor_to_model(self.buffers["weight0"].recv, self.models[0])
-        tensor_to_model(self.buffers["weight1"].recv, self.models[1])
+        for i in range(2):
+            tensor_to_model(self.buffers[f"weight{i}"].recv, self.models[i])
 
     def forward_model(self):
         self.current_model_index = 1
@@ -145,7 +145,13 @@ class WeiPipe:
         outputs.backward(grad)
 
         grad_buffer = self.buffers["grad"]
+
+        # print_rank0(grad_buffer.send)
+        # print_rank0(grad_buffer.recv)
         grad_to_tensor(self.current_model(), grad_buffer.send)
+        # print_rank0(grad_buffer.send)
+        # print_rank0(grad_buffer.recv)
+        # print_rank0("--------------------")
         return inputs.grad
 
     def calc_grad(self, targets):
@@ -157,7 +163,7 @@ class WeiPipe:
         return grad, loss
 
     def forward_backward_step(
-        self, inputs, targets=None, gradient_accumulation_steps=4
+        self, inputs, targets=None, gradient_accumulation_steps=1
     ):
         bsz, seq_len = inputs.shape
         micro_bsz = bsz // gradient_accumulation_steps
@@ -286,6 +292,7 @@ class WeiPipe:
     def update(self):
         tensor_to_grad(self.buffers["grad"].send / self.world_size, self.model_fp32)
         self.buffers["grad"].send.zero_()
+        self.buffers["grad"].recv.zero_()
         nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
         self.optimizer.step()
         self.optimizer.zero_grad()

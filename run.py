@@ -113,7 +113,7 @@ if __name__ == "__main__":
         loss = model.forward_backward_step(X, Y)
         X, Y = next(train_batch_iter)
 
-        if iter_num % 20 == 0:
+        if iter_num % 5 == 0:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
             lossf = loss.item()
             print_rank0(

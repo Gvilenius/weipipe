@@ -91,10 +91,6 @@ def tensor_to_model(tensor, model):
         i += n
 
 
-def init_tensor(n, dtype=torch.bfloat16, init_func=torch.empty):
-    return init_func(n).cuda().to(dtype)
-
-
 def model_to_tensor(model, tensor):
     i = 0
     for p in model.parameters():
@@ -102,6 +98,10 @@ def model_to_tensor(model, tensor):
         n = len(data)
         tensor[i : i + n] = data
         i += n
+
+
+def init_tensor(n, dtype=torch.bfloat16, init_func=torch.empty):
+    return init_func(n).cuda().to(dtype)
 
 
 def configure_optimizers(
