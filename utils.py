@@ -2,6 +2,7 @@ import inspect
 import math
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 
 import os
 from model import Transformer, ModelArgs
@@ -54,6 +55,11 @@ def save_model(layers, optimizer, model_args, iter_num):
 
 def loss_fn(y_, y):
     return F.cross_entropy(y_.view(-1, y_.shape[-1]), y.view(-1))
+
+
+def print_rank0(x):
+    if dist.get_rank() == 0:
+        print(x)
 
 
 def grad_to_tensor(model, tensor):

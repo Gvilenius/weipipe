@@ -14,6 +14,7 @@ from utils import (
     model_to_tensor,
     tensor_to_model,
     init_tensor,
+    print_rank0,
 )
 
 
@@ -35,20 +36,10 @@ class Buffer:
 
 
 class WeiPipe:
-    def __init__(self) -> None:
+    def __init__(self, config) -> None:
         # Setup world info
-        model_args = dict(
-            dim=288,
-            n_heads=6,
-            n_kv_heads=None,
-            vocab_size=32000,
-            multiple_of=32,
-            max_seq_len=128,
-            dropout=0.0,
-            n_layers=6,
-        )
-        self.config = ModelArgs(**model_args)
 
+        self.config = config
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
 
@@ -70,6 +61,7 @@ class WeiPipe:
         self.current_model_index = 0
 
         self.loss_fn = loss_fn
+        self.activations = []
 
         self.optimizer = configure_optimizers(self.model_fp32)
         self.optimizer.zero_grad()
@@ -136,47 +128,84 @@ class WeiPipe:
     def forward(self, x):
         return self.get_full_transformer(x)
 
-    def forward_backward_step(self, inputs, targets=None, first=False):
-        # if first:
+    def forward_step(self, is_first, is_last):
+        self.forward_model()
+        x = self.activations[-1]
+        with torch.no_grad():
+            y = self.current_model()(x, is_first=is_first, is_last=is_last)
+        self.activations.append(y)
+
+    def backward_step(self, grad, is_first, is_last):
+        self.backward_model()
+        inputs = self.activations.pop().detach()
+        if not is_first:
+            inputs.requires_grad = True
+        # recomputation
+        outputs = self.current_model()(inputs, is_first=is_first, is_last=is_last)
+        outputs.backward(grad)
+
+        grad_buffer = self.buffers["grad"]
+        grad_to_tensor(self.current_model(), grad_buffer.send)
+        return inputs.grad
+
+    def calc_grad(self, targets):
+        outputs = self.activations.pop()
+        outputs.requires_grad = True
+        loss = self.loss_fn(outputs, targets)
+        loss.backward()
+        grad = outputs.grad
+        return grad, loss
+
+    def forward_backward_step(
+        self, inputs, targets=None, gradient_accumulation_steps=4
+    ):
+        bsz, seq_len = inputs.shape
+        micro_bsz = bsz // gradient_accumulation_steps
+
+        inputs = torch.split(inputs, micro_bsz, 0)
+        targets = torch.split(targets, micro_bsz, 0)
+
         self.weight_swap()
-        self.activations = [inputs]
-        loss = None
-        for i in range(self.world_size * 3):
-            i_offset = i - self.rank
-            is_first = i_offset in [0, self.world_size * 2 - 1]
-            is_last = i_offset in [self.world_size - 1, self.world_size]
 
-            # calculate loss
-            if i_offset == self.world_size:
-                outputs = self.activations.pop()
-                outputs.requires_grad = True
-                loss = self.loss_fn(outputs, targets)
-                loss.backward()
-                grad = outputs.grad
+        # warmup
+        for i in range(self.rank):
+            self.weight_grad_flow()
 
-            # forward
-            if 0 <= i_offset < self.world_size:
-                self.forward_model()
-                x = self.activations[-1]
-                with torch.no_grad():
-                    y = self.current_model()(x, is_first=is_first, is_last=is_last)
-                self.activations.append(y)
-            # backward
-            elif self.world_size <= i_offset < self.world_size * 2:
-                self.backward_model()
-                inputs = self.activations.pop().detach()
-                if not is_first:
-                    inputs.requires_grad = True
-                # recomputation
-                outputs = self.current_model()(
-                    inputs, is_first=is_first, is_last=is_last
-                )
-                outputs.backward(grad)
-                grad = inputs.grad
+        for istep in range(gradient_accumulation_steps):
+            input = inputs[istep]
+            target = targets[istep]
+            self.activations.append(input)
 
-                grad_buffer = self.buffers["grad"]
-                grad_to_tensor(self.current_model(), grad_buffer.send)
+            for i in range(self.world_size):
+                self.forward_step(i == 0, i == self.world_size - 1)
+                self.weight_grad_flow()
 
+            grad, loss = self.calc_grad(target)
+
+            for i in range(self.world_size):
+                grad = self.backward_step(grad, i == self.world_size - 1, i == 0)
+                self.weight_grad_flow()
+
+            # for i in range(self.world_size * 3):
+            #     i_offset = i - self.rank
+            #     is_first = i_offset in [0, self.world_size * 2 - 1]
+            #     is_last = i_offset in [self.world_size - 1, self.world_size]
+
+            #     # calculate loss
+            #     if i_offset == self.world_size:
+            #         grad, loss = self.calc_grad(target)
+
+            #     # forward
+            #     if 0 <= i_offset < self.world_size:
+            #         self.forward_step(is_first, is_last)
+            #     # backward
+            #     elif self.world_size <= i_offset < self.world_size * 2:
+            #         grad = self.backward_step(grad, is_first, is_last)
+
+            #     self.weight_grad_flow()
+
+        # cooldown
+        for i in range(self.world_size - self.rank):
             self.weight_grad_flow()
         self.update()
         return loss
