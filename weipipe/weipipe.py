@@ -14,7 +14,7 @@ from utils import (
     model_to_tensor,
     tensor_to_model,
     init_tensor,
-    print_rank0,
+    print_rank,
 )
 
 
@@ -36,7 +36,7 @@ class Buffer:
 
 
 class WeiPipe:
-    def __init__(self, config) -> None:
+    def __init__(self, config, batch_size):
         # Setup world info
 
         self.config = config
@@ -146,12 +146,7 @@ class WeiPipe:
 
         grad_buffer = self.buffers["grad"]
 
-        # print_rank0(grad_buffer.send)
-        # print_rank0(grad_buffer.recv)
         grad_to_tensor(self.current_model(), grad_buffer.send)
-        # print_rank0(grad_buffer.send)
-        # print_rank0(grad_buffer.recv)
-        # print_rank0("--------------------")
         return inputs.grad
 
     def calc_grad(self, targets):

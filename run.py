@@ -1,4 +1,4 @@
-from weipipe import WeiPipe
+from weipipe import WeiPipe, ActPipe
 import time
 import os
 from functools import partial
@@ -9,7 +9,7 @@ import tempfile
 import torch.distributed as dist
 import argparse
 from tinystories import Task
-from utils import get_lr, print_rank0
+from utils import get_lr, print_rank
 from model import ModelArgs
 
 torch.manual_seed(1234)
@@ -18,6 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--local_rank", default=-1, type=int)
 parser.add_argument("--rank", default=-1, type=int)
 parser.add_argument("--batch_size", default=64, type=int)
+parser.add_argument("--mode", default="wei", type=str)
 args = parser.parse_args()
 
 
@@ -42,21 +43,24 @@ def init_process_group():
 init_process_group()
 
 model_args = dict(
-    dim=288,
+    dim=64,
     n_heads=6,
     n_kv_heads=None,
     vocab_size=32000,
     multiple_of=32,
-    max_seq_len=128,
+    max_seq_len=512,
     dropout=0.0,
     n_layers=6,
 )
-model = WeiPipe(ModelArgs(**model_args))
-
 
 learning_rate = 5e-4
-gradient_accumulation_steps = 4
 batch_size = args.batch_size
+
+if args.mode == "act":
+    model = ActPipe(ModelArgs(**model_args), batch_size=batch_size)
+else:
+    model = WeiPipe(ModelArgs(**model_args), batch_size=batch_size)
+
 
 eval_interval = 100
 
@@ -96,10 +100,11 @@ if __name__ == "__main__":
 
     iter_num = 0
     start = time.time()
-    while True:
+    n_total_samples = 0
+
+    while n_total_samples < 64 * 100 + 1:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
-
         # if (iter_num + 1) % eval_interval == 0:
         #     transformer = model.get_full_transformer()
 
@@ -113,10 +118,16 @@ if __name__ == "__main__":
         loss = model.forward_backward_step(X, Y)
         X, Y = next(train_batch_iter)
 
-        if iter_num % 5 == 0:
+        if args.mode == "wei":
+            loss_rank = 0
+            n_total_samples += batch_size * dist.get_world_size()
+        else:
+            loss_rank = dist.get_world_size() - 1
+            n_total_samples += batch_size
+
+        if iter_num % 5 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-            lossf = loss.item()
-            print_rank0(
-                f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | time {time.time() - start :.2f}"
+            print(
+                f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {time.time() - start :.2f}",
             )
         iter_num += 1
