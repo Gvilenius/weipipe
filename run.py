@@ -11,6 +11,7 @@ import argparse
 from tinystories import Task
 from utils import get_lr, print_rank
 from model import ModelArgs
+from torch.profiler import profile, record_function, ProfilerActivity
 
 torch.manual_seed(1234)
 
@@ -43,12 +44,12 @@ def init_process_group():
 init_process_group()
 
 model_args = dict(
-    dim=64,
+    dim=144,
     n_heads=6,
     n_kv_heads=None,
     vocab_size=32000,
     multiple_of=32,
-    max_seq_len=512,
+    max_seq_len=128,
     dropout=0.0,
     n_layers=6,
 )
@@ -114,8 +115,11 @@ if __name__ == "__main__":
         #         out_dir = "out"
         #         print(f"saving checkpoint to {out_dir}")
         #         transformer.export(os.path.join(out_dir, "model.bin"))
-
+        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         loss = model.forward_backward_step(X, Y)
+        # print(prof.key_averages().table(sort_by="cuda_time"))
+        # prof.export_chrome_trace("trace.json")
+
         X, Y = next(train_batch_iter)
 
         if args.mode == "wei":

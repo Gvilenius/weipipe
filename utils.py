@@ -62,7 +62,7 @@ def print_rank(rank, x):
         print(x)
 
 
-transfer_embedding = False
+transfer_embedding = True
 
 
 def grad_to_tensor(model, tensor):
@@ -73,8 +73,6 @@ def grad_to_tensor(model, tensor):
             if p.grad is not None:
                 data = p.grad.flatten()
                 tensor[i : i + n] += data
-            else:
-                tensor[i : i + n] += 0
             i += n
     else:
         for p in model.layers.parameters():
@@ -82,8 +80,6 @@ def grad_to_tensor(model, tensor):
             if p.grad is not None:
                 data = p.grad.flatten()
                 tensor[i : i + n] += data
-            else:
-                tensor[i : i + n] += 0
             i += n
 
     model.zero_grad()
@@ -125,13 +121,13 @@ def model_to_tensor(model, tensor):
     i = 0
     if transfer_embedding:
         for p in model.parameters():
-            data = p.data.flatten().cuda()
+            data = p.data.flatten()
             n = len(data)
             tensor[i : i + n] = data
             i += n
     else:
         for p in model.layers.parameters():
-            data = p.data.flatten().cuda()
+            data = p.data.flatten()
             n = len(data)
             tensor[i : i + n] = data
             i += n

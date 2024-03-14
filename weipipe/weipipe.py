@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import copy
 from pprint import pprint
 from model import Layer, ModelArgs, Transformer
+from torch.profiler import profile, record_function, ProfilerActivity
 
 from utils import (
     loss_fn,
@@ -58,6 +59,19 @@ class WeiPipe:
             "grad": Buffer(self.n_parameter),
         }
 
+        i = 0
+        for p in self.models[0].parameters():
+            n = p.data.numel()
+            self.buffers["weight0"].recv[i : i + n] = p.data.view(-1)
+            i += n
+
+        for j in range(2):
+            i = 0
+            for n, p in self.models[j].named_parameters():
+                n = p.data.numel()
+                p.data = self.buffers[f"weight{j}"].recv[i : i + n].view(p.data.shape)
+                i += n
+
         self.current_model_index = 0
 
         self.loss_fn = loss_fn
@@ -71,15 +85,15 @@ class WeiPipe:
         dst_rank = self.world_size - 1 - self.rank
 
         weight_buffer = self.buffers["weight0"]
-        model_to_tensor(self.models[0], weight_buffer.send)
+        weight_buffer.send = copy.deepcopy(weight_buffer.recv)
 
         send_op = dist.P2POp(dist.isend, weight_buffer.send, dst_rank)
-        recv_op = dist.P2POp(dist.irecv, weight_buffer.recv, dst_rank)
+        recv_op = dist.P2POp(dist.irecv, self.buffers["weight1"].recv, dst_rank)
 
         reqs = dist.batch_isend_irecv([send_op, recv_op])
+
         for r in reqs:
             r.wait()
-        tensor_to_model(weight_buffer.recv, self.models[1])
 
     def flow_op(self, idx):
         prev_rank = (self.rank + self.world_size - 1) % self.world_size
@@ -91,7 +105,9 @@ class WeiPipe:
 
     def weight_grad_flow(self):
         for i in range(2):
-            model_to_tensor(self.models[i], self.buffers[f"weight{i}"].send)
+            # model_to_tensor(self.models[i], self.buffers[f"weight{i}"].send)
+            weight_buffer = self.buffers[f"weight{i}"]
+            weight_buffer.send = copy.deepcopy(weight_buffer.recv)
 
         grad_flow_op = self.flow_op("grad")
         weight_flow_op = self.flow_op("weight0") + self.flow_op("weight1")
@@ -99,9 +115,6 @@ class WeiPipe:
         for req in reqs:
             req.wait()
         self.buffers["grad"].pingpong()
-
-        for i in range(2):
-            tensor_to_model(self.buffers[f"weight{i}"].recv, self.models[i])
 
     def forward_model(self):
         self.current_model_index = 1
@@ -166,7 +179,9 @@ class WeiPipe:
         inputs = torch.split(inputs, micro_bsz, 0)
         targets = torch.split(targets, micro_bsz, 0)
 
+        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         self.weight_swap()
+        # print(prof.key_averages().table(sort_by="cuda_time"))
 
         # warmup
         for i in range(self.rank):
@@ -186,24 +201,6 @@ class WeiPipe:
             for i in range(self.world_size):
                 grad = self.backward_step(grad, i == self.world_size - 1, i == 0)
                 self.weight_grad_flow()
-
-            # for i in range(self.world_size * 3):
-            #     i_offset = i - self.rank
-            #     is_first = i_offset in [0, self.world_size * 2 - 1]
-            #     is_last = i_offset in [self.world_size - 1, self.world_size]
-
-            #     # calculate loss
-            #     if i_offset == self.world_size:
-            #         grad, loss = self.calc_grad(target)
-
-            #     # forward
-            #     if 0 <= i_offset < self.world_size:
-            #         self.forward_step(is_first, is_last)
-            #     # backward
-            #     elif self.world_size <= i_offset < self.world_size * 2:
-            #         grad = self.backward_step(grad, is_first, is_last)
-
-            #     self.weight_grad_flow()
 
         # cooldown
         for i in range(self.world_size - self.rank):
@@ -247,7 +244,6 @@ class WeiPipe:
                 transformer.output = self.model_fp32.output
 
                 dist.gather(tensor, tensors)
-                print(tensor, tensors)
                 tensors = tensors[1:] + [tensor]
 
                 tensor_to_model(torch.hstack(tensors), transformer.layers)
@@ -290,7 +286,13 @@ class WeiPipe:
         nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
         self.optimizer.step()
         self.optimizer.zero_grad()
-        self.models[0] = copy.deepcopy(self.model_fp32).bfloat16()
+
+        i = 0
+
+        for p in self.model_fp32.parameters():
+            n = p.data.numel()
+            self.buffers["weight0"].recv[i : i + n] = p.data.view(-1).bfloat16()
+            i += n
 
     def current_model(self):
         return self.models[self.current_model_index]
