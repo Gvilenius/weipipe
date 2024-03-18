@@ -33,14 +33,16 @@ class ActivationBuffer:
         else:
             self.activations.insert(0, x)
 
+    # for backward
     def pop(self):
         if not self._reverse:
-            return self.activations.pop()
-        else:
             y = self.activations[0]
             del self.activations[0]
             return y
+        else:
+            return self.activations.pop()
 
+    # for forward
     def top(self):
         if not self._reverse:
             return self.activations[-1]
@@ -354,6 +356,7 @@ class WeiPipeAccum:
 
         self.flattern_weight()
         self.counter = {}
+        self.gradient_accumulation_steps = 4
 
     def flattern_weight(self):
         i = 0
@@ -413,13 +416,18 @@ class WeiPipeAccum:
     def forward(self, x):
         return self.get_full_transformer(x)
 
-    def forward_step(self, is_first=False, is_last=False):
+    def forward_step(self, i_layer):
         x = self.activations.top()
         with torch.no_grad():
-            y = self.forward_model()(x, is_first=is_first, is_last=is_last)
+            y = self.forward_model()(
+                x, is_first=i_layer == 0, is_last=i_layer == self.world_size - 1
+            )
         self.activations.push(y)
 
-    def backward_step(self, grad=None, is_first=False, is_last=False):
+    def backward_step(self, grad=None, i_layer=-1):
+        is_first = i_layer == 0
+        is_last = i_layer == self.world_size - 1
+
         inputs = self.activations.pop().detach()
         if not is_first:
             inputs.requires_grad = True
@@ -440,11 +448,11 @@ class WeiPipeAccum:
         grad = outputs.grad
         return grad, loss
 
-    def forward_backward_step(
-        self, inputs, targets=None, gradient_accumulation_steps=3
-    ):
+    # mark
+    def forward_backward_step(self, inputs, targets=None):
         ### fuck async
 
+        gradient_accumulation_steps = self.gradient_accumulation_steps
         bsz, seq_len = inputs.shape
         micro_bsz = bsz // gradient_accumulation_steps
 
@@ -456,100 +464,47 @@ class WeiPipeAccum:
         # ------------------------------
 
         self.activations.push(inputs[0])
-
         for _ in range(self.rank):
             wait(self.forward_weight_flow())
 
-        for i in range(self.world_size - self.rank - 1):
-            self.forward_step(is_first=i == 0, is_last=i == self.world_size - 1)
+        for i in range(self.world_size - self.rank):
+            self.forward_step(i_layer=i)
             wait(self.forward_weight_flow())
 
-        for i in range((self.world_size * gradient_accumulation_steps)):
-            i_micro_batch = (i - 1 - self.rank) // self.world_size + 1
-
-            i_layer_forward = (i - self.rank + self.world_size - 1) % self.world_size
-            i_layer_backward = (self.rank - i + self.world_size - 1) % self.world_size
-
-            # 1F
-            if i_micro_batch < gradient_accumulation_steps:
-                print(self.rank, i, i_layer_forward, i_layer_backward)
-                print(len(self.activations.activations))
-                self.forward_step(
-                    is_first=i_layer_forward == 0,
-                    is_last=i_layer_forward == self.world_size - 1,
-                )
-                if i_layer_forward != self.world_size - 1:
-                    self.activations.reverse()
-
+        for i in range(self.rank):
+            wait(self.backward_weight_flow())
+            self.forward_step(i_layer=i)
             wait(self.forward_weight_flow())
 
-            # 1B
-            if i >= self.rank:
-                if i_layer_forward == self.world_size - 1:
-                    target = targets[i_micro_batch]
-                    grad, loss = self.calc_grad(target)
+        for i in range(gradient_accumulation_steps):
+            self.activations.reverse()
+            self.activations.push(inputs[i + 1])
 
+            grad, loss = self.calc_grad(targets[i])
+            for j in range(self.world_size):
                 grad = self.backward_step(
                     grad=grad,
-                    is_first=i_layer_backward == self.world_size - 1,
-                    is_last=i_layer_backward == 0,
+                    i_layer=self.world_size - 1 - j,
                 )
-                self.activations.reverse()
-                if (
-                    i_micro_batch + 1 < gradient_accumulation_steps
-                    and i_layer_forward == self.world_size - 1
-                ):
-                    self.activations.push(inputs[i_micro_batch + 1])
+                self.grad_flow()
+                wait(self.backward_weight_flow())
 
-            wait(self.backward_weight_flow())
+                self.forward_step(i_layer=j)
+                wait(self.forward_weight_flow())
+
+        grad, loss = self.calc_grad(targets[-1])
+        self.activations.reverse()
+        for i in range(self.world_size - 1 - self.rank):
+            grad = self.backward_step(grad=grad, i_layer=self.world_size - 1 - i)
             self.grad_flow()
+            wait(self.backward_weight_flow())
+            wait(self.forward_weight_flow())
 
         for i in range(self.world_size):
-            if i < self.rank:
-                grad = self.backward_step(
-                    grad=grad,
-                    is_first=i == self.world_size - 1,
-                    is_last=i == 0,
-                )
-            wait(self.backward_weight_flow())
+            if i <= self.rank:
+                grad = self.backward_step(grad=grad, i_layer=self.world_size - 1 - i)
             self.grad_flow()
-
-        # ------------------------------
-
-        # for _ in range(self.rank):
-        #     wait(self.forward_weight_flow())
-
-        # # first microbatch
-        # self.activations.append(inputs[0])
-        # for i in range(self.world_size):
-        #     self.forward_step(
-        #         reverse=False, is_first=i == 0, is_last=i == self.world_size - 1
-        #     )
-        #     wait(self.forward_weight_flow())
-
-        #     if i >= self.world_size - self.rank:
-        #         self.grad_flow()
-        #         wait(self.backward_weight_flow())
-
-        # # last microbatch
-        # grad, loss = self.calc_grad(reverse=reverse, targets=targets[-1])
-        # for i in range(self.world_size):
-        #     grad = self.backward_step(
-        #         grad=grad,
-        #         reverse=reverse,
-        #         is_first=i == self.world_size - 1,
-        #         is_last=i == 0,
-        #     )
-
-        #     if i < self.world_size - self.rank - 1:
-        #         wait(self.forward_weight_flow())
-        #     self.grad_flow()
-        #     wait(self.backward_weight_flow())
-
-        # # cooldown-bubble
-        # for i in range(self.world_size - self.rank):
-        #     self.grad_flow()
-        #     wait(self.backward_weight_flow())
+            wait(self.backward_weight_flow())
 
         self.update()
         exit()
