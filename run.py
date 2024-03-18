@@ -19,6 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--local_rank", default=-1, type=int)
 parser.add_argument("--rank", default=-1, type=int)
 parser.add_argument("--batch_size", default=64, type=int)
+parser.add_argument("--gradient_accumulation_steps", default=1, type=int)
 parser.add_argument("--mode", default="wei", type=str)
 args = parser.parse_args()
 
@@ -64,6 +65,7 @@ elif args.mode == "wei":
 elif args.mode == "weiaccum":
     model = WeiPipeAccum(ModelArgs(**model_args), batch_size=batch_size)
 
+model.gradient_accumulation_steps = args.gradient_accumulation_steps
 
 eval_interval = 100
 
@@ -133,7 +135,13 @@ if __name__ == "__main__":
 
         if iter_num % 5 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-            print(
-                f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {time.time() - start :.2f}",
-            )
+            try:
+                print(
+                    f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {time.time() - start :.2f}",
+                )
+            except Exception:
+                print(
+                    f"{iter_num} |  lr {lr:e} | time {time.time() - start :.2f}",
+                )
+                
         iter_num += 1

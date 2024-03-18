@@ -55,15 +55,15 @@ def debug(func):
         if func.__name__ not in self.counter:
             self.counter[func.__name__] = 0
         self.counter[func.__name__] += 1
-        print(self.rank, func.__name__)
         return func(self, *args)
 
     return wrapper
 
 
 def wait(reqs):
-    for r in reqs:
-        r.wait()
+    if reqs is not None:
+        for r in reqs:
+            r.wait()
 
 
 class Buffer:
@@ -246,6 +246,7 @@ class WeiPipe:
         # cooldown
         for i in range(self.world_size - self.rank):
             self.weight_grad_flow()
+
         self.update()
         return loss
 
@@ -372,14 +373,6 @@ class WeiPipeAccum:
                 p.data = self.buffers[f"weight{j}"].recv[i : i + n].view(p.data.shape)
                 i += n
 
-    def weight_swap(self):
-        """At the begining, swap weight between rank i and rank n-i"""
-        dst_rank = self.world_size - 1 - self.rank
-        send_op = dist.P2POp(dist.isend, self.buffers["weight0"].recv, dst_rank)
-        recv_op = dist.P2POp(dist.irecv, self.buffers["weight1"].recv, dst_rank)
-        reqs = dist.batch_isend_irecv([send_op, recv_op])
-        return reqs
-
     def flow_op(self, idx):
         prev_rank = (self.rank + self.world_size - 1) % self.world_size
         next_rank = (self.rank + 1) % self.world_size
@@ -395,12 +388,24 @@ class WeiPipeAccum:
         # print(idx, weight_buffer.buffers)
         return dist.batch_isend_irecv(weight_flow_op)
 
+    @debug
+    def weight_swap(self):
+        """At the begining, swap weight between rank i and rank n-i"""
+        dst_rank = self.world_size - 1 - self.rank
+        send_op = dist.P2POp(dist.isend, self.buffers["weight0"].recv, dst_rank)
+        recv_op = dist.P2POp(dist.irecv, self.buffers["weight1"].recv, dst_rank)
+        reqs = dist.batch_isend_irecv([send_op, recv_op])
+        return reqs
+
+    @debug
     def forward_weight_flow(self):
         return self.weight_flow(1)
 
+    @debug
     def backward_weight_flow(self):
         return self.weight_flow(0)
 
+    @debug
     def grad_flow(self):
         wait(dist.batch_isend_irecv(self.flow_op("grad")))
         self.buffers["grad"].pingpong()
@@ -458,9 +463,7 @@ class WeiPipeAccum:
 
         inputs = torch.split(inputs, micro_bsz, 0)
         targets = torch.split(targets, micro_bsz, 0)
-
         wait(self.weight_swap())
-
         # ------------------------------
 
         self.activations.push(inputs[0])
@@ -472,11 +475,12 @@ class WeiPipeAccum:
             wait(self.forward_weight_flow())
 
         for i in range(self.rank):
+            self.grad_flow()
             wait(self.backward_weight_flow())
-            self.forward_step(i_layer=i)
+            self.forward_step(i_layer=self.world_size  + i -self.rank)
             wait(self.forward_weight_flow())
 
-        for i in range(gradient_accumulation_steps):
+        for i in range(gradient_accumulation_steps-1):
             self.activations.reverse()
             self.activations.push(inputs[i + 1])
 
@@ -492,22 +496,22 @@ class WeiPipeAccum:
                 self.forward_step(i_layer=j)
                 wait(self.forward_weight_flow())
 
-        grad, loss = self.calc_grad(targets[-1])
         self.activations.reverse()
+        grad, loss = self.calc_grad(targets[-1])
         for i in range(self.world_size - 1 - self.rank):
             grad = self.backward_step(grad=grad, i_layer=self.world_size - 1 - i)
             self.grad_flow()
             wait(self.backward_weight_flow())
             wait(self.forward_weight_flow())
 
-        for i in range(self.world_size):
+        for i in range(self.world_size + 1):
             if i <= self.rank:
-                grad = self.backward_step(grad=grad, i_layer=self.world_size - 1 - i)
+                grad = self.backward_step(grad=grad, i_layer=self.rank - i)
             self.grad_flow()
             wait(self.backward_weight_flow())
 
+        self.activations.reverse()
         self.update()
-        exit()
         return loss
 
     def set_lr(self, lr):
@@ -583,7 +587,7 @@ class WeiPipeAccum:
             pp(self.model_fp32)
 
     def update(self):
-        tensor_to_grad(self.buffers["grad"].send / self.world_size, self.model_fp32)
+        tensor_to_grad(self.buffers["grad"].send / self.world_size / self.gradient_accumulation_steps, self.model_fp32)
         self.buffers["grad"].send.zero_()
         nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
         self.optimizer.step()

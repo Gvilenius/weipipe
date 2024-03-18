@@ -34,8 +34,9 @@ class ActPipe:
         self.is_first = self.rank == 0
         self.is_last = self.rank == self.world_size - 1
 
+        self.gradient_accumulation_steps = 4
         self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
-        self.act_shape = (self.batch_size, self.config.max_seq_len, self.config.dim)
+        self.act_shape = (self.batch_size//self.gradient_accumulation_steps, self.config.max_seq_len, self.config.dim)
         self.model = copy.deepcopy(self.model_fp32).bfloat16()
 
         self.loss_fn = loss_fn
@@ -66,14 +67,15 @@ class ActPipe:
         loss.backward()
         return outputs.grad, loss
 
-    def forward_backward_step(self, inputs, targets, gradient_accumulation_steps=1):
+    def forward_backward_step(self, inputs, targets, ):
+        gradient_accumulation_steps = self.gradient_accumulation_steps
         bsz, seq_len = inputs.shape
         micro_bsz = bsz // gradient_accumulation_steps
 
-        if self.rank == 0:
-            dist.send(targets, self.world_size - 1)
-        if self.rank == self.world_size - 1:
-            dist.recv(targets, 0)
+        # if self.rank == 0:
+        #     dist.send(targets, self.world_size - 1)
+        # if self.rank == self.world_size - 1:
+        #     dist.recv(targets, 0)
 
         inputs = torch.split(inputs, micro_bsz, 0)
         targets = torch.split(targets, micro_bsz, 0)
@@ -102,8 +104,8 @@ class ActPipe:
 
             grad = self.backward_step(grad)
 
-        if self.rank != 0:
-            self.send_grad(grad)
+            if self.rank != 0:
+                self.send_grad(grad)
 
         self.update()
         return loss
