@@ -1,4 +1,4 @@
-from weipipe import WeiPipe, ActPipe
+from weipipe import WeiPipe, ActPipe, WeiPipeAccum
 import time
 import os
 from functools import partial
@@ -59,8 +59,10 @@ batch_size = args.batch_size
 
 if args.mode == "act":
     model = ActPipe(ModelArgs(**model_args), batch_size=batch_size)
-else:
+elif args.mode == "wei":
     model = WeiPipe(ModelArgs(**model_args), batch_size=batch_size)
+elif args.mode == "weiaccum":
+    model = WeiPipeAccum(ModelArgs(**model_args), batch_size=batch_size)
 
 
 eval_interval = 100
@@ -103,7 +105,7 @@ if __name__ == "__main__":
     start = time.time()
     n_total_samples = 0
 
-    while n_total_samples < 64 * 100 + 1:
+    while n_total_samples < 640 * 100 + 1:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
         # if (iter_num + 1) % eval_interval == 0:

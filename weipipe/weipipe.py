@@ -19,11 +19,56 @@ from utils import (
 )
 
 
+class ActivationBuffer:
+    def __init__(self):
+        self.activations = []
+        self._reverse = False
+
+    def reverse(self):
+        self._reverse = not self._reverse
+
+    def push(self, x):
+        if not self._reverse:
+            self.activations.append(x)
+        else:
+            self.activations.insert(0, x)
+
+    def pop(self):
+        if not self._reverse:
+            return self.activations.pop()
+        else:
+            y = self.activations[0]
+            del self.activations[0]
+            return y
+
+    def top(self):
+        if not self._reverse:
+            return self.activations[-1]
+        else:
+            return self.activations[0]
+
+
+def debug(func):
+    def wrapper(self, *args):
+        if func.__name__ not in self.counter:
+            self.counter[func.__name__] = 0
+        self.counter[func.__name__] += 1
+        print(self.rank, func.__name__)
+        return func(self, *args)
+
+    return wrapper
+
+
+def wait(reqs):
+    for r in reqs:
+        r.wait()
+
+
 class Buffer:
     def __init__(self, n):
         self.buffers = [
             init_tensor(n, init_func=torch.zeros),
-            init_tensor(n),
+            init_tensor(n, init_func=torch.zeros),
         ]
 
         self.index = 0
@@ -59,6 +104,17 @@ class WeiPipe:
             "grad": Buffer(self.n_parameter),
         }
 
+        self.current_model_index = 0
+
+        self.loss_fn = loss_fn
+        self.activations = []
+
+        self.optimizer = configure_optimizers(self.model_fp32)
+        self.optimizer.zero_grad()
+
+        self.flattern_weight()
+
+    def flattern_weight(self):
         i = 0
         for p in self.models[0].parameters():
             n = p.data.numel()
@@ -72,20 +128,12 @@ class WeiPipe:
                 p.data = self.buffers[f"weight{j}"].recv[i : i + n].view(p.data.shape)
                 i += n
 
-        self.current_model_index = 0
-
-        self.loss_fn = loss_fn
-        self.activations = []
-
-        self.optimizer = configure_optimizers(self.model_fp32)
-        self.optimizer.zero_grad()
-
     def weight_swap(self):
         """At the begining, swap weight between rank i and rank n-i"""
         dst_rank = self.world_size - 1 - self.rank
 
         weight_buffer = self.buffers["weight0"]
-        weight_buffer.send = copy.deepcopy(weight_buffer.recv)
+        weight_buffer.send.copy_(weight_buffer.recv)
 
         send_op = dist.P2POp(dist.isend, weight_buffer.send, dst_rank)
         recv_op = dist.P2POp(dist.irecv, self.buffers["weight1"].recv, dst_rank)
@@ -107,7 +155,7 @@ class WeiPipe:
         for i in range(2):
             # model_to_tensor(self.models[i], self.buffers[f"weight{i}"].send)
             weight_buffer = self.buffers[f"weight{i}"]
-            weight_buffer.send = copy.deepcopy(weight_buffer.recv)
+            weight_buffer.send.copy_(weight_buffer.recv)
 
         grad_flow_op = self.flow_op("grad")
         weight_flow_op = self.flow_op("weight0") + self.flow_op("weight1")
@@ -170,14 +218,8 @@ class WeiPipe:
         grad = outputs.grad
         return grad, loss
 
-    def forward_backward_step(
-        self, inputs, targets=None, gradient_accumulation_steps=1
-    ):
+    def forward_backward_step(self, inputs, targets=None):
         bsz, seq_len = inputs.shape
-        micro_bsz = bsz // gradient_accumulation_steps
-
-        inputs = torch.split(inputs, micro_bsz, 0)
-        targets = torch.split(targets, micro_bsz, 0)
 
         # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         self.weight_swap()
@@ -187,25 +229,330 @@ class WeiPipe:
         for i in range(self.rank):
             self.weight_grad_flow()
 
-        for istep in range(gradient_accumulation_steps):
-            input = inputs[istep]
-            target = targets[istep]
-            self.activations.append(input)
+        self.activations.append(inputs)
 
-            for i in range(self.world_size):
-                self.forward_step(i == 0, i == self.world_size - 1)
-                self.weight_grad_flow()
+        for i in range(self.world_size):
+            self.forward_step(i == 0, i == self.world_size - 1)
+            self.weight_grad_flow()
 
-            grad, loss = self.calc_grad(target)
+        grad, loss = self.calc_grad(targets)
 
-            for i in range(self.world_size):
-                grad = self.backward_step(grad, i == self.world_size - 1, i == 0)
-                self.weight_grad_flow()
+        for i in range(self.world_size):
+            grad = self.backward_step(grad, i == self.world_size - 1, i == 0)
+            self.weight_grad_flow()
 
         # cooldown
         for i in range(self.world_size - self.rank):
             self.weight_grad_flow()
         self.update()
+        return loss
+
+    def set_lr(self, lr):
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+
+    def get_full_transformer(self):
+        n = sum(x.numel() for x in self.model_fp32.layers.parameters())
+        n_embedding = sum(
+            x.numel() for x in self.model_fp32.tok_embeddings.parameters()
+        )
+        tensor = init_tensor(n, dtype=torch.float32)
+        model_to_tensor(self.model_fp32.layers, tensor)
+
+        sector_len = len(tensor)
+        transformer = None
+
+        if self.rank == 0:
+            transformer = Transformer(self.config).cuda()
+            if self.world_size == 1:
+                transformer.layers = self.model_fp32.layers
+                transformer.norm = self.model_fp32.norm
+                transformer.output = self.model_fp32.output
+
+                tensor = init_tensor(n_embedding, dtype=torch.float32)
+                model_to_tensor(self.model_fp32.tok_embeddings, tensor)
+                tensor_to_model(tensor, transformer.tok_embeddings)
+                # transformer.tok_embeddings = self.model_fp32.tok_embeddings
+            else:
+                tensors = [
+                    torch.empty(sector_len).float().cuda()
+                    for i in range(self.world_size)
+                ]
+
+                transformer.norm = self.model_fp32.norm
+                transformer.output = self.model_fp32.output
+
+                dist.gather(tensor, tensors)
+                tensors = tensors[1:] + [tensor]
+
+                tensor_to_model(torch.hstack(tensors), transformer.layers)
+
+                tensor = init_tensor(n_embedding, dtype=torch.float32)
+                dist.recv(tensor, 1)
+                tensor_to_model(tensor, transformer.tok_embeddings)
+
+        else:
+            dist.gather(tensor)
+            if self.rank == 1:
+                tensor = init_tensor(n_embedding, dtype=torch.float32)
+                model_to_tensor(self.model_fp32.tok_embeddings, tensor)
+                dist.send(
+                    tensor,
+                    0,
+                )
+
+        dist.barrier()
+        return transformer
+
+    def update(self):
+        tensor_to_grad(self.buffers["grad"].send / self.world_size, self.model_fp32)
+        self.buffers["grad"].send.zero_()
+        nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+
+        i = 0
+        for p in self.model_fp32.parameters():
+            n = p.data.numel()
+            self.buffers["weight0"].recv[i : i + n] = p.data.view(-1).bfloat16()
+            i += n
+
+    def current_model(self):
+        return self.models[self.current_model_index]
+
+
+class WeiPipeAccum:
+    def __init__(self, config, batch_size):
+        # Setup world info
+
+        self.config = config
+        self.world_size = dist.get_world_size()
+        self.rank = dist.get_rank()
+
+        self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
+
+        self.models = [
+            copy.deepcopy(self.model_fp32).bfloat16(),
+            Layer(self.rank, self.world_size, self.config).bfloat16().cuda(),
+        ]
+
+        self.n_parameter = sum(x.numel() for x in self.models[0].parameters())
+
+        self.buffers = {
+            "weight0": Buffer(self.n_parameter),
+            "weight1": Buffer(self.n_parameter),
+            "grad": Buffer(self.n_parameter),
+        }
+
+        self.current_model_index = 0
+
+        self.loss_fn = loss_fn
+        self.activations = ActivationBuffer()
+
+        self.optimizer = configure_optimizers(self.model_fp32)
+        self.optimizer.zero_grad()
+
+        self.flattern_weight()
+        self.counter = {}
+
+    def flattern_weight(self):
+        i = 0
+        for p in self.models[0].parameters():
+            n = p.data.numel()
+            self.buffers["weight0"].recv[i : i + n] = p.data.view(-1)
+            i += n
+
+        for j in range(2):
+            i = 0
+            for n, p in self.models[j].named_parameters():
+                n = p.data.numel()
+                p.data = self.buffers[f"weight{j}"].recv[i : i + n].view(p.data.shape)
+                i += n
+
+    def weight_swap(self):
+        """At the begining, swap weight between rank i and rank n-i"""
+        dst_rank = self.world_size - 1 - self.rank
+        send_op = dist.P2POp(dist.isend, self.buffers["weight0"].recv, dst_rank)
+        recv_op = dist.P2POp(dist.irecv, self.buffers["weight1"].recv, dst_rank)
+        reqs = dist.batch_isend_irecv([send_op, recv_op])
+        return reqs
+
+    def flow_op(self, idx):
+        prev_rank = (self.rank + self.world_size - 1) % self.world_size
+        next_rank = (self.rank + 1) % self.world_size
+        buffer = self.buffers[idx]
+        send_op = dist.P2POp(dist.isend, buffer.send, next_rank)
+        recv_op = dist.P2POp(dist.irecv, buffer.recv, prev_rank)
+        return [send_op, recv_op]
+
+    def weight_flow(self, idx):
+        weight_buffer = self.buffers[f"weight{idx}"]
+        weight_buffer.send.copy_(weight_buffer.recv)
+        weight_flow_op = self.flow_op(f"weight{idx}")
+        # print(idx, weight_buffer.buffers)
+        return dist.batch_isend_irecv(weight_flow_op)
+
+    def forward_weight_flow(self):
+        return self.weight_flow(1)
+
+    def backward_weight_flow(self):
+        return self.weight_flow(0)
+
+    def grad_flow(self):
+        wait(dist.batch_isend_irecv(self.flow_op("grad")))
+        self.buffers["grad"].pingpong()
+
+    def forward_model(self):
+        self.current_model_index = 1
+        return self.models[self.current_model_index]
+
+    def backward_model(self):
+        self.current_model_index = 0
+        return self.models[self.current_model_index]
+
+    def forward(self, x):
+        return self.get_full_transformer(x)
+
+    def forward_step(self, is_first=False, is_last=False):
+        x = self.activations.top()
+        with torch.no_grad():
+            y = self.forward_model()(x, is_first=is_first, is_last=is_last)
+        self.activations.push(y)
+
+    def backward_step(self, grad=None, is_first=False, is_last=False):
+        inputs = self.activations.pop().detach()
+        if not is_first:
+            inputs.requires_grad = True
+        # recomputation
+        outputs = self.backward_model()(inputs, is_first=is_first, is_last=is_last)
+        outputs.backward(grad)
+        grad_buffer = self.buffers["grad"]
+        grad_to_tensor(self.backward_model(), grad_buffer.send)
+
+        return inputs.grad
+
+    def calc_grad(self, targets=None):
+        outputs = self.activations.pop()
+
+        outputs.requires_grad = True
+        loss = self.loss_fn(outputs, targets)
+        loss.backward()
+        grad = outputs.grad
+        return grad, loss
+
+    def forward_backward_step(
+        self, inputs, targets=None, gradient_accumulation_steps=3
+    ):
+        ### fuck async
+
+        bsz, seq_len = inputs.shape
+        micro_bsz = bsz // gradient_accumulation_steps
+
+        inputs = torch.split(inputs, micro_bsz, 0)
+        targets = torch.split(targets, micro_bsz, 0)
+
+        wait(self.weight_swap())
+
+        # ------------------------------
+
+        self.activations.push(inputs[0])
+
+        for _ in range(self.rank):
+            wait(self.forward_weight_flow())
+
+        for i in range(self.world_size - self.rank - 1):
+            self.forward_step(is_first=i == 0, is_last=i == self.world_size - 1)
+            wait(self.forward_weight_flow())
+
+        for i in range((self.world_size * gradient_accumulation_steps)):
+            i_micro_batch = (i - 1 - self.rank) // self.world_size + 1
+
+            i_layer_forward = (i - self.rank + self.world_size - 1) % self.world_size
+            i_layer_backward = (self.rank - i + self.world_size - 1) % self.world_size
+
+            # 1F
+            if i_micro_batch < gradient_accumulation_steps:
+                print(self.rank, i, i_layer_forward, i_layer_backward)
+                print(len(self.activations.activations))
+                self.forward_step(
+                    is_first=i_layer_forward == 0,
+                    is_last=i_layer_forward == self.world_size - 1,
+                )
+                if i_layer_forward != self.world_size - 1:
+                    self.activations.reverse()
+
+            wait(self.forward_weight_flow())
+
+            # 1B
+            if i >= self.rank:
+                if i_layer_forward == self.world_size - 1:
+                    target = targets[i_micro_batch]
+                    grad, loss = self.calc_grad(target)
+
+                grad = self.backward_step(
+                    grad=grad,
+                    is_first=i_layer_backward == self.world_size - 1,
+                    is_last=i_layer_backward == 0,
+                )
+                self.activations.reverse()
+                if (
+                    i_micro_batch + 1 < gradient_accumulation_steps
+                    and i_layer_forward == self.world_size - 1
+                ):
+                    self.activations.push(inputs[i_micro_batch + 1])
+
+            wait(self.backward_weight_flow())
+            self.grad_flow()
+
+        for i in range(self.world_size):
+            if i < self.rank:
+                grad = self.backward_step(
+                    grad=grad,
+                    is_first=i == self.world_size - 1,
+                    is_last=i == 0,
+                )
+            wait(self.backward_weight_flow())
+            self.grad_flow()
+
+        # ------------------------------
+
+        # for _ in range(self.rank):
+        #     wait(self.forward_weight_flow())
+
+        # # first microbatch
+        # self.activations.append(inputs[0])
+        # for i in range(self.world_size):
+        #     self.forward_step(
+        #         reverse=False, is_first=i == 0, is_last=i == self.world_size - 1
+        #     )
+        #     wait(self.forward_weight_flow())
+
+        #     if i >= self.world_size - self.rank:
+        #         self.grad_flow()
+        #         wait(self.backward_weight_flow())
+
+        # # last microbatch
+        # grad, loss = self.calc_grad(reverse=reverse, targets=targets[-1])
+        # for i in range(self.world_size):
+        #     grad = self.backward_step(
+        #         grad=grad,
+        #         reverse=reverse,
+        #         is_first=i == self.world_size - 1,
+        #         is_last=i == 0,
+        #     )
+
+        #     if i < self.world_size - self.rank - 1:
+        #         wait(self.forward_weight_flow())
+        #     self.grad_flow()
+        #     wait(self.backward_weight_flow())
+
+        # # cooldown-bubble
+        # for i in range(self.world_size - self.rank):
+        #     self.grad_flow()
+        #     wait(self.backward_weight_flow())
+
+        self.update()
+        exit()
         return loss
 
     def set_lr(self, lr):
@@ -288,11 +635,7 @@ class WeiPipe:
         self.optimizer.zero_grad()
 
         i = 0
-
         for p in self.model_fp32.parameters():
             n = p.data.numel()
             self.buffers["weight0"].recv[i : i + n] = p.data.view(-1).bfloat16()
             i += n
-
-    def current_model(self):
-        return self.models[self.current_model_index]

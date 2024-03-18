@@ -57,15 +57,18 @@ def loss_fn(y_, y):
     return F.cross_entropy(y_.view(-1, y_.shape[-1]), y.view(-1))
 
 
-def print_rank(rank, x):
+def print_rank(rank, *x):
     if dist.get_rank() == rank:
-        print(x)
+        print(*x)
 
 
 transfer_embedding = True
 
 
 def grad_to_tensor(model, tensor):
+    # for n, p in model.named_parameters():
+    #     print(n, p.data, p.grad)
+    #     break
     i = 0
     if transfer_embedding:
         for p in model.parameters():
