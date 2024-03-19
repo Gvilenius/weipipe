@@ -84,248 +84,7 @@ class Buffer:
 
 
 class WeiPipe:
-    def __init__(self, config, batch_size):
-        # Setup world info
-
-        self.config = config
-        self.world_size = dist.get_world_size()
-        self.rank = dist.get_rank()
-
-        self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
-
-        self.models = [
-            copy.deepcopy(self.model_fp32).bfloat16(),
-            Layer(self.rank, self.world_size, self.config).bfloat16().cuda(),
-        ]
-
-        self.n_parameter = sum(x.numel() for x in self.models[0].parameters())
-
-        self.buffers = {
-            "weight0": Buffer(self.n_parameter),
-            "weight1": Buffer(self.n_parameter),
-            "grad": Buffer(self.n_parameter),
-        }
-
-        self.current_model_index = 0
-
-        self.loss_fn = loss_fn
-        self.activations = []
-
-        self.optimizer = configure_optimizers(self.model_fp32)
-        self.optimizer.zero_grad()
-
-        self.flattern_weight()
-
-    def flattern_weight(self):
-        i = 0
-        for p in self.models[0].parameters():
-            n = p.data.numel()
-            self.buffers["weight0"].recv[i : i + n] = p.data.view(-1)
-            i += n
-
-        for j in range(2):
-            i = 0
-            for n, p in self.models[j].named_parameters():
-                n = p.data.numel()
-                p.data = self.buffers[f"weight{j}"].recv[i : i + n].view(p.data.shape)
-                i += n
-
-    def weight_swap(self):
-        """At the begining, swap weight between rank i and rank n-i"""
-        dst_rank = self.world_size - 1 - self.rank
-
-        weight_buffer = self.buffers["weight0"]
-        weight_buffer.send.copy_(weight_buffer.recv)
-
-        send_op = dist.P2POp(dist.isend, weight_buffer.send, dst_rank)
-        recv_op = dist.P2POp(dist.irecv, self.buffers["weight1"].recv, dst_rank)
-
-        reqs = dist.batch_isend_irecv([send_op, recv_op])
-
-        for r in reqs:
-            r.wait()
-
-    def flow_op(self, idx):
-        prev_rank = (self.rank + self.world_size - 1) % self.world_size
-        next_rank = (self.rank + 1) % self.world_size
-        buffer = self.buffers[idx]
-        send_op = dist.P2POp(dist.isend, buffer.send, next_rank)
-        recv_op = dist.P2POp(dist.irecv, buffer.recv, prev_rank)
-        return [send_op, recv_op]
-
-    def weight_grad_flow(self):
-        for i in range(2):
-            # model_to_tensor(self.models[i], self.buffers[f"weight{i}"].send)
-            weight_buffer = self.buffers[f"weight{i}"]
-            weight_buffer.send.copy_(weight_buffer.recv)
-
-        grad_flow_op = self.flow_op("grad")
-        weight_flow_op = self.flow_op("weight0") + self.flow_op("weight1")
-        reqs = dist.batch_isend_irecv(grad_flow_op + weight_flow_op)
-        for req in reqs:
-            req.wait()
-        self.buffers["grad"].pingpong()
-
-    def forward_model(self):
-        self.current_model_index = 1
-        return self.models[self.current_model_index]
-
-    def backward_model(self):
-        self.current_model_index = 0
-        return self.models[self.current_model_index]
-
-    def print_model(self, all=False):
-        model_str = str(*self.current_model().parameters())
-        if self.current_model_index == 0:
-            msg = f"rank{self.rank} forward using {model_str}"
-        else:
-            msg = f"rank{self.rank} backward using {model_str}"
-
-        if all:
-            model_str0 = str(*self.models[0].parameters())
-            model_str1 = str(*self.models[1].parameters())
-            msg = f"rank{self.rank} all model parameter is {model_str0} {model_str1}"
-
-        print(msg)
-
-    def forward(self, x):
-        return self.get_full_transformer(x)
-
-    def forward_step(self, is_first, is_last):
-        self.forward_model()
-        x = self.activations[-1]
-        with torch.no_grad():
-            y = self.current_model()(x, is_first=is_first, is_last=is_last)
-        self.activations.append(y)
-
-    def backward_step(self, grad, is_first, is_last):
-        self.backward_model()
-        inputs = self.activations.pop().detach()
-        if not is_first:
-            inputs.requires_grad = True
-        # recomputation
-        outputs = self.current_model()(inputs, is_first=is_first, is_last=is_last)
-        outputs.backward(grad)
-
-        grad_buffer = self.buffers["grad"]
-
-        grad_to_tensor(self.current_model(), grad_buffer.send)
-        return inputs.grad
-
-    def calc_grad(self, targets):
-        outputs = self.activations.pop()
-        outputs.requires_grad = True
-        loss = self.loss_fn(outputs, targets)
-        loss.backward()
-        grad = outputs.grad
-        return grad, loss
-
-    def forward_backward_step(self, inputs, targets=None):
-        bsz, seq_len = inputs.shape
-
-        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-        self.weight_swap()
-        # print(prof.key_averages().table(sort_by="cuda_time"))
-
-        # warmup
-        for i in range(self.rank):
-            self.weight_grad_flow()
-
-        self.activations.append(inputs)
-
-        for i in range(self.world_size):
-            self.forward_step(i == 0, i == self.world_size - 1)
-            self.weight_grad_flow()
-
-        grad, loss = self.calc_grad(targets)
-
-        for i in range(self.world_size):
-            grad = self.backward_step(grad, i == self.world_size - 1, i == 0)
-            self.weight_grad_flow()
-
-        # cooldown
-        for i in range(self.world_size - self.rank):
-            self.weight_grad_flow()
-
-        self.update()
-        return loss
-
-    def set_lr(self, lr):
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = lr
-
-    def get_full_transformer(self):
-        n = sum(x.numel() for x in self.model_fp32.layers.parameters())
-        n_embedding = sum(
-            x.numel() for x in self.model_fp32.tok_embeddings.parameters()
-        )
-        tensor = init_tensor(n, dtype=torch.float32)
-        model_to_tensor(self.model_fp32.layers, tensor)
-
-        sector_len = len(tensor)
-        transformer = None
-
-        if self.rank == 0:
-            transformer = Transformer(self.config).cuda()
-            if self.world_size == 1:
-                transformer.layers = self.model_fp32.layers
-                transformer.norm = self.model_fp32.norm
-                transformer.output = self.model_fp32.output
-
-                tensor = init_tensor(n_embedding, dtype=torch.float32)
-                model_to_tensor(self.model_fp32.tok_embeddings, tensor)
-                tensor_to_model(tensor, transformer.tok_embeddings)
-                # transformer.tok_embeddings = self.model_fp32.tok_embeddings
-            else:
-                tensors = [
-                    torch.empty(sector_len).float().cuda()
-                    for i in range(self.world_size)
-                ]
-
-                transformer.norm = self.model_fp32.norm
-                transformer.output = self.model_fp32.output
-
-                dist.gather(tensor, tensors)
-                tensors = tensors[1:] + [tensor]
-
-                tensor_to_model(torch.hstack(tensors), transformer.layers)
-
-                tensor = init_tensor(n_embedding, dtype=torch.float32)
-                dist.recv(tensor, 1)
-                tensor_to_model(tensor, transformer.tok_embeddings)
-
-        else:
-            dist.gather(tensor)
-            if self.rank == 1:
-                tensor = init_tensor(n_embedding, dtype=torch.float32)
-                model_to_tensor(self.model_fp32.tok_embeddings, tensor)
-                dist.send(
-                    tensor,
-                    0,
-                )
-
-        dist.barrier()
-        return transformer
-
-    def update(self):
-        tensor_to_grad(self.buffers["grad"].send / self.world_size, self.model_fp32)
-        self.buffers["grad"].send.zero_()
-        nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
-        self.optimizer.step()
-        self.optimizer.zero_grad()
-
-        i = 0
-        for p in self.model_fp32.parameters():
-            n = p.data.numel()
-            self.buffers["weight0"].recv[i : i + n] = p.data.view(-1).bfloat16()
-            i += n
-
-    def current_model(self):
-        return self.models[self.current_model_index]
-
-
-class WeiPipeAccum:
-    def __init__(self, config, batch_size):
+    def __init__(self, config, batch_size, gradient_accumulation_steps=1):
         # Setup world info
 
         self.config = config
@@ -357,7 +116,7 @@ class WeiPipeAccum:
 
         self.flattern_weight()
         self.counter = {}
-        self.gradient_accumulation_steps = 4
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
     def flattern_weight(self):
         i = 0
@@ -407,8 +166,11 @@ class WeiPipeAccum:
 
     @debug
     def grad_flow(self):
-        wait(dist.batch_isend_irecv(self.flow_op("grad")))
+        grad_buffer = self.buffers["grad"]
+        grad_to_tensor(self.backward_model(), grad_buffer.send)
+        reqs = dist.batch_isend_irecv(self.flow_op("grad"))
         self.buffers["grad"].pingpong()
+        return reqs
 
     def forward_model(self):
         self.current_model_index = 1
@@ -439,8 +201,6 @@ class WeiPipeAccum:
         # recomputation
         outputs = self.backward_model()(inputs, is_first=is_first, is_last=is_last)
         outputs.backward(grad)
-        grad_buffer = self.buffers["grad"]
-        grad_to_tensor(self.backward_model(), grad_buffer.send)
 
         return inputs.grad
 
@@ -467,18 +227,28 @@ class WeiPipeAccum:
         # ------------------------------
 
         self.activations.push(inputs[0])
+        f_reqs = None
+        b_reqs = None
+        g_reqs = None
         for _ in range(self.rank):
-            wait(self.forward_weight_flow())
+            wait(f_reqs)
+            f_reqs = self.forward_weight_flow()
 
         for i in range(self.world_size - self.rank):
+            wait(f_reqs)
             self.forward_step(i_layer=i)
-            wait(self.forward_weight_flow())
+            f_reqs = self.forward_weight_flow()
 
         for i in range(self.rank):
-            self.grad_flow()
-            wait(self.backward_weight_flow())
+            wait(b_reqs)
+            b_reqs = self.backward_weight_flow()
+
+            wait(g_reqs)
+            g_reqs = self.grad_flow()
+
+            wait(f_reqs)
             self.forward_step(i_layer=self.world_size  + i -self.rank)
-            wait(self.forward_weight_flow())
+            f_reqs = self.forward_weight_flow()
 
         for i in range(gradient_accumulation_steps-1):
             self.activations.reverse()
@@ -486,29 +256,45 @@ class WeiPipeAccum:
 
             grad, loss = self.calc_grad(targets[i])
             for j in range(self.world_size):
+                wait(b_reqs)
                 grad = self.backward_step(
                     grad=grad,
                     i_layer=self.world_size - 1 - j,
                 )
-                self.grad_flow()
-                wait(self.backward_weight_flow())
+                b_reqs = self.backward_weight_flow()
 
+                wait(g_reqs)
+                g_reqs = self.grad_flow()
+
+                wait(f_reqs)
                 self.forward_step(i_layer=j)
-                wait(self.forward_weight_flow())
+                f_reqs = self.forward_weight_flow()
 
         self.activations.reverse()
         grad, loss = self.calc_grad(targets[-1])
         for i in range(self.world_size - 1 - self.rank):
+            wait(b_reqs)
             grad = self.backward_step(grad=grad, i_layer=self.world_size - 1 - i)
-            self.grad_flow()
-            wait(self.backward_weight_flow())
-            wait(self.forward_weight_flow())
+            b_reqs = self.backward_weight_flow()
+
+            wait(g_reqs)
+            g_reqs = self.grad_flow()
+
+            wait(f_reqs)
+            f_reqs = self.forward_weight_flow()
 
         for i in range(self.world_size + 1):
+            wait (b_reqs)
             if i <= self.rank:
                 grad = self.backward_step(grad=grad, i_layer=self.rank - i)
-            self.grad_flow()
-            wait(self.backward_weight_flow())
+            b_reqs = self.backward_weight_flow()
+
+            wait(g_reqs)
+            g_reqs = self.grad_flow()
+        
+        wait(f_reqs)
+        wait(b_reqs)
+        wait(g_reqs)
 
         self.activations.reverse()
         self.update()

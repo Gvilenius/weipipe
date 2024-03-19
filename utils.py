@@ -61,9 +61,7 @@ def print_rank(rank, *x):
     if dist.get_rank() == rank:
         print(*x)
 
-
 transfer_embedding = True
-
 
 def grad_to_tensor(model, tensor):
     # for n, p in model.named_parameters():

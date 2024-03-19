@@ -23,7 +23,7 @@ def debug(func):
 
 
 class ActPipe:
-    def __init__(self, config, batch_size):
+    def __init__(self, config, batch_size, gradient_accumulation_steps=1):
         # Setup world info
         self.config = config
         self.world_size = dist.get_world_size()
@@ -34,7 +34,8 @@ class ActPipe:
         self.is_first = self.rank == 0
         self.is_last = self.rank == self.world_size - 1
 
-        self.gradient_accumulation_steps = 4
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+
         self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
         self.act_shape = (self.batch_size//self.gradient_accumulation_steps, self.config.max_seq_len, self.config.dim)
         self.model = copy.deepcopy(self.model_fp32).bfloat16()
@@ -72,10 +73,10 @@ class ActPipe:
         bsz, seq_len = inputs.shape
         micro_bsz = bsz // gradient_accumulation_steps
 
-        # if self.rank == 0:
-        #     dist.send(targets, self.world_size - 1)
-        # if self.rank == self.world_size - 1:
-        #     dist.recv(targets, 0)
+        if self.rank == 0:
+            dist.send(targets, self.world_size - 1)
+        if self.rank == self.world_size - 1:
+            dist.recv(targets, 0)
 
         inputs = torch.split(inputs, micro_bsz, 0)
         targets = torch.split(targets, micro_bsz, 0)

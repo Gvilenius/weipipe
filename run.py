@@ -1,4 +1,4 @@
-from weipipe import WeiPipe, ActPipe, WeiPipeAccum
+from weipipe import WeiPipe, ActPipe 
 import time
 import os
 from functools import partial
@@ -50,25 +50,24 @@ model_args = dict(
     n_kv_heads=None,
     vocab_size=32000,
     multiple_of=32,
-    max_seq_len=128,
+    max_seq_len=512,
     dropout=0.0,
-    n_layers=6,
+    n_layers=2,
 )
 
 learning_rate = 5e-4
 batch_size = args.batch_size
 
 if args.mode == "act":
-    model = ActPipe(ModelArgs(**model_args), batch_size=batch_size)
+    model = ActPipe(ModelArgs(**model_args), batch_size=batch_size, gradient_accumulation_steps = args.gradient_accumulation_steps
+)
 elif args.mode == "wei":
-    model = WeiPipe(ModelArgs(**model_args), batch_size=batch_size)
-elif args.mode == "weiaccum":
-    model = WeiPipeAccum(ModelArgs(**model_args), batch_size=batch_size)
-
-model.gradient_accumulation_steps = args.gradient_accumulation_steps
+    model = WeiPipe(ModelArgs(**model_args), batch_size=batch_size, gradient_accumulation_steps = args.gradient_accumulation_steps
+)
+else:
+    assert False
 
 eval_interval = 100
-
 iter_batches = partial(
     Task.iter_batches,
     batch_size=batch_size,
@@ -76,7 +75,6 @@ iter_batches = partial(
     device="cuda",
     num_workers=0,
 )
-
 
 @torch.no_grad()
 def estimate_loss(model, eval_iters=20):
@@ -95,7 +93,6 @@ def estimate_loss(model, eval_iters=20):
     model.train()
     return out
 
-
 if __name__ == "__main__":
     learning_rate = 5e-4
     torch.manual_seed(1234)
@@ -107,7 +104,7 @@ if __name__ == "__main__":
     start = time.time()
     n_total_samples = 0
 
-    while n_total_samples < 640 * 100 + 1:
+    while n_total_samples < 640000 * 100 + 1:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
         # if (iter_num + 1) % eval_interval == 0:
@@ -133,15 +130,18 @@ if __name__ == "__main__":
             loss_rank = dist.get_world_size() - 1
             n_total_samples += batch_size
 
-        if iter_num % 5 == 0 and dist.get_rank() == loss_rank:
+        if iter_num % 10 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-            try:
-                print(
-                    f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {time.time() - start :.2f}",
-                )
-            except Exception:
-                print(
-                    f"{iter_num} |  lr {lr:e} | time {time.time() - start :.2f}",
-                )
+            if iter_num == 0:
+                start = time.time()
+            else:
+                try:
+                    print(
+                        f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {time.time() - start :.2f}",
+                    )
+                except Exception:
+                    print(
+                        f"{iter_num} |  lr {lr:e} | time {time.time() - start :.2f}",
+                    )
                 
         iter_num += 1
