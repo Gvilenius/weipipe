@@ -45,7 +45,7 @@ def init_process_group():
 init_process_group()
 
 model_args = dict(
-    dim=288 * 4,
+    dim=288,
     n_heads=6,
     n_kv_heads=None,
     vocab_size=32000,
@@ -56,6 +56,8 @@ model_args = dict(
 )
 
 learning_rate = 5e-4
+
+# microbatch size
 batch_size = args.batch_size
 
 if args.mode == "act":

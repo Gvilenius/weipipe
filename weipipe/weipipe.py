@@ -61,7 +61,6 @@ def debug(func):
 
 
 def wait(reqs):
-    return
     if reqs is not None:
         for r in reqs:
             r.wait()
@@ -84,6 +83,11 @@ class Buffer:
         self.recv = self.buffers[1 - self.index]
 
 
+def params(m):
+    # return m.parameters()
+    return m.layers.parameters()
+
+
 class WeiPipe:
     def __init__(self, config, batch_size, gradient_accumulation_steps=1):
         # Setup world info
@@ -99,7 +103,7 @@ class WeiPipe:
             Layer(self.rank, self.world_size, self.config).bfloat16().cuda(),
         ]
 
-        self.n_parameter = sum(x.numel() for x in self.models[0].parameters())
+        self.n_parameter = sum(x.numel() for x in params(self.models[0]))
 
         self.buffers = {
             "weight0": Buffer(self.n_parameter),
@@ -121,14 +125,14 @@ class WeiPipe:
 
     def flattern_weight(self):
         i = 0
-        for p in self.models[0].parameters():
+        for p in params(self.models[0]):
             n = p.data.numel()
             self.buffers["weight0"].recv[i : i + n] = p.data.view(-1)
             i += n
 
         for j in range(2):
             i = 0
-            for n, p in self.models[j].named_parameters():
+            for p in params(self.models[j]):
                 n = p.data.numel()
                 p.data = self.buffers[f"weight{j}"].recv[i : i + n].view(p.data.shape)
                 i += n
@@ -353,21 +357,6 @@ class WeiPipe:
         dist.barrier()
         return transformer
 
-    def print_weight(self):
-        def pp(m):
-            s = ""
-            for p in m.parameters():
-                s += str(p.data) + "\n"
-            print(s)
-
-        for i in range(0, self.world_size - 1):
-            dist.barrier()
-            if self.rank == i + 1:
-                pp(self.model_fp32)
-        dist.barrier()
-        if self.rank == 0:
-            pp(self.model_fp32)
-
     def update(self):
         tensor_to_grad(
             self.buffers["grad"].send
@@ -376,12 +365,13 @@ class WeiPipe:
             self.model_fp32,
         )
         self.buffers["grad"].send.zero_()
-        nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
+
+        nn.utils.clip_grad_norm_(params(self.model_fp32), 1.0)
         self.optimizer.step()
         self.optimizer.zero_grad()
 
         i = 0
-        for p in self.model_fp32.parameters():
+        for p in params(self.model_fp32):
             n = p.data.numel()
             self.buffers["weight0"].recv[i : i + n] = p.data.view(-1).bfloat16()
             i += n
