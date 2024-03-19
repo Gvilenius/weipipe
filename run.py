@@ -1,4 +1,4 @@
-from weipipe import WeiPipe, ActPipe 
+from weipipe import WeiPipe, ActPipe
 import time
 import os
 from functools import partial
@@ -45,25 +45,31 @@ def init_process_group():
 init_process_group()
 
 model_args = dict(
-    dim=144,
+    dim=288 * 4,
     n_heads=6,
     n_kv_heads=None,
     vocab_size=32000,
     multiple_of=32,
-    max_seq_len=512,
+    max_seq_len=128,
     dropout=0.0,
-    n_layers=2,
+    n_layers=6,
 )
 
 learning_rate = 5e-4
 batch_size = args.batch_size
 
 if args.mode == "act":
-    model = ActPipe(ModelArgs(**model_args), batch_size=batch_size, gradient_accumulation_steps = args.gradient_accumulation_steps
-)
+    model = ActPipe(
+        ModelArgs(**model_args),
+        batch_size=batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+    )
 elif args.mode == "wei":
-    model = WeiPipe(ModelArgs(**model_args), batch_size=batch_size, gradient_accumulation_steps = args.gradient_accumulation_steps
-)
+    model = WeiPipe(
+        ModelArgs(**model_args),
+        batch_size=batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+    )
 else:
     assert False
 
@@ -75,6 +81,7 @@ iter_batches = partial(
     device="cuda",
     num_workers=0,
 )
+
 
 @torch.no_grad()
 def estimate_loss(model, eval_iters=20):
@@ -92,6 +99,7 @@ def estimate_loss(model, eval_iters=20):
         out[split] = losses.mean()
     model.train()
     return out
+
 
 if __name__ == "__main__":
     learning_rate = 5e-4
@@ -130,18 +138,12 @@ if __name__ == "__main__":
             loss_rank = dist.get_world_size() - 1
             n_total_samples += batch_size
 
+        dt = time.time() - start
+        start = time.time()
         if iter_num % 10 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-            if iter_num == 0:
-                start = time.time()
-            else:
-                try:
-                    print(
-                        f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {time.time() - start :.2f}",
-                    )
-                except Exception:
-                    print(
-                        f"{iter_num} |  lr {lr:e} | time {time.time() - start :.2f}",
-                    )
-                
+            print(
+                f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
+            )
+
         iter_num += 1

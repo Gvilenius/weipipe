@@ -61,6 +61,7 @@ def debug(func):
 
 
 def wait(reqs):
+    return
     if reqs is not None:
         for r in reqs:
             r.wait()
@@ -144,10 +145,8 @@ class WeiPipe:
         weight_buffer = self.buffers[f"weight{idx}"]
         weight_buffer.send.copy_(weight_buffer.recv)
         weight_flow_op = self.flow_op(f"weight{idx}")
-        # print(idx, weight_buffer.buffers)
         return dist.batch_isend_irecv(weight_flow_op)
 
-    @debug
     def weight_swap(self):
         """At the begining, swap weight between rank i and rank n-i"""
         dst_rank = self.world_size - 1 - self.rank
@@ -156,15 +155,12 @@ class WeiPipe:
         reqs = dist.batch_isend_irecv([send_op, recv_op])
         return reqs
 
-    @debug
     def forward_weight_flow(self):
         return self.weight_flow(1)
 
-    @debug
     def backward_weight_flow(self):
         return self.weight_flow(0)
 
-    @debug
     def grad_flow(self):
         grad_buffer = self.buffers["grad"]
         grad_to_tensor(self.backward_model(), grad_buffer.send)
@@ -247,10 +243,10 @@ class WeiPipe:
             g_reqs = self.grad_flow()
 
             wait(f_reqs)
-            self.forward_step(i_layer=self.world_size  + i -self.rank)
+            self.forward_step(i_layer=self.world_size + i - self.rank)
             f_reqs = self.forward_weight_flow()
 
-        for i in range(gradient_accumulation_steps-1):
+        for i in range(gradient_accumulation_steps - 1):
             self.activations.reverse()
             self.activations.push(inputs[i + 1])
 
@@ -284,14 +280,14 @@ class WeiPipe:
             f_reqs = self.forward_weight_flow()
 
         for i in range(self.world_size + 1):
-            wait (b_reqs)
+            wait(b_reqs)
             if i <= self.rank:
                 grad = self.backward_step(grad=grad, i_layer=self.rank - i)
             b_reqs = self.backward_weight_flow()
 
             wait(g_reqs)
             g_reqs = self.grad_flow()
-        
+
         wait(f_reqs)
         wait(b_reqs)
         wait(g_reqs)
@@ -373,7 +369,12 @@ class WeiPipe:
             pp(self.model_fp32)
 
     def update(self):
-        tensor_to_grad(self.buffers["grad"].send / self.world_size / self.gradient_accumulation_steps, self.model_fp32)
+        tensor_to_grad(
+            self.buffers["grad"].send
+            / self.world_size
+            / self.gradient_accumulation_steps,
+            self.model_fp32,
+        )
         self.buffers["grad"].send.zero_()
         nn.utils.clip_grad_norm_(self.model_fp32.parameters(), 1.0)
         self.optimizer.step()
