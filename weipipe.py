@@ -84,8 +84,8 @@ class Buffer:
 
 
 def params(m):
-    # return m.parameters()
-    return m.layers.parameters()
+    return m.parameters()
+    # return m.layers.parameters()
 
 
 class WeiPipe:
@@ -365,6 +365,7 @@ class WeiPipe:
             self.model_fp32,
         )
         self.buffers["grad"].send.zero_()
+        self.backward_model().zero_grad()
 
         nn.utils.clip_grad_norm_(params(self.model_fp32), 1.0)
         self.optimizer.step()

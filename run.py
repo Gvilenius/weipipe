@@ -1,4 +1,6 @@
-from weipipe import WeiPipe, ActPipe
+from weipipe import WeiPipe
+from actpipe import ActPipe
+from dp import DP
 import time
 import os
 from functools import partial
@@ -72,6 +74,12 @@ elif args.mode == "wei":
         batch_size=batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
+elif args.mode == "dp":
+    model = DP(
+        ModelArgs(**model_args),
+        batch_size=batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+    )
 else:
     assert False
 
@@ -133,7 +141,7 @@ if __name__ == "__main__":
 
         X, Y = next(train_batch_iter)
 
-        if args.mode == "wei":
+        if args.mode != "act":
             loss_rank = 0
             n_total_samples += batch_size * dist.get_world_size()
         else:

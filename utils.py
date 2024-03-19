@@ -62,7 +62,7 @@ def print_rank(rank, *x):
         print(*x)
 
 
-transfer_embedding = False
+transfer_embedding = True
 
 
 def grad_to_tensor(model, tensor):
