@@ -12,8 +12,6 @@ from utils import (
     configure_optimizers,
     grad_to_tensor,
     tensor_to_grad,
-    model_to_tensor,
-    tensor_to_model,
     init_tensor,
     print_rank,
 )

@@ -441,7 +441,7 @@ class Layer(nn.Module):
         self.world_size = world_size
         self.config = config
         self.layers = nn.ModuleList()
-        for i in range(config.n_layers // world_size):
+        for i in range(config.n_layers):
             self.layers.append(TransformerBlock(rank, config))
 
         freqs_cos, freqs_sin = precompute_freqs_cis(

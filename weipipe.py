@@ -12,8 +12,6 @@ from utils import (
     configure_optimizers,
     grad_to_tensor,
     tensor_to_grad,
-    model_to_tensor,
-    tensor_to_model,
     init_tensor,
     print_rank,
 )
@@ -92,9 +90,11 @@ class WeiPipe:
     def __init__(self, config, batch_size, gradient_accumulation_steps=1):
         # Setup world info
 
-        self.config = config
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
+
+        config.n_layers //= self.world_size
+        self.config = config
 
         self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
 
@@ -304,58 +304,58 @@ class WeiPipe:
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
 
-    def get_full_transformer(self):
-        n = sum(x.numel() for x in self.model_fp32.layers.parameters())
-        n_embedding = sum(
-            x.numel() for x in self.model_fp32.tok_embeddings.parameters()
-        )
-        tensor = init_tensor(n, dtype=torch.float32)
-        model_to_tensor(self.model_fp32.layers, tensor)
+    # def get_full_transformer(self):
+    #     n = sum(x.numel() for x in self.model_fp32.layers.parameters())
+    #     n_embedding = sum(
+    #         x.numel() for x in self.model_fp32.tok_embeddings.parameters()
+    #     )
+    #     tensor = init_tensor(n, dtype=torch.float32)
+    #     model_to_tensor(self.model_fp32.layers, tensor)
 
-        sector_len = len(tensor)
-        transformer = None
+    #     sector_len = len(tensor)
+    #     transformer = None
 
-        if self.rank == 0:
-            transformer = Transformer(self.config).cuda()
-            if self.world_size == 1:
-                transformer.layers = self.model_fp32.layers
-                transformer.norm = self.model_fp32.norm
-                transformer.output = self.model_fp32.output
+    #     if self.rank == 0:
+    #         transformer = Transformer(self.config).cuda()
+    #         if self.world_size == 1:
+    #             transformer.layers = self.model_fp32.layers
+    #             transformer.norm = self.model_fp32.norm
+    #             transformer.output = self.model_fp32.output
 
-                tensor = init_tensor(n_embedding, dtype=torch.float32)
-                model_to_tensor(self.model_fp32.tok_embeddings, tensor)
-                tensor_to_model(tensor, transformer.tok_embeddings)
-                # transformer.tok_embeddings = self.model_fp32.tok_embeddings
-            else:
-                tensors = [
-                    torch.empty(sector_len).float().cuda()
-                    for i in range(self.world_size)
-                ]
+    #             tensor = init_tensor(n_embedding, dtype=torch.float32)
+    #             model_to_tensor(self.model_fp32.tok_embeddings, tensor)
+    #             tensor_to_model(tensor, transformer.tok_embeddings)
+    #             # transformer.tok_embeddings = self.model_fp32.tok_embeddings
+    #         else:
+    #             tensors = [
+    #                 torch.empty(sector_len).float().cuda()
+    #                 for i in range(self.world_size)
+    #             ]
 
-                transformer.norm = self.model_fp32.norm
-                transformer.output = self.model_fp32.output
+    #             transformer.norm = self.model_fp32.norm
+    #             transformer.output = self.model_fp32.output
 
-                dist.gather(tensor, tensors)
-                tensors = tensors[1:] + [tensor]
+    #             dist.gather(tensor, tensors)
+    #             tensors = tensors[1:] + [tensor]
 
-                tensor_to_model(torch.hstack(tensors), transformer.layers)
+    #             tensor_to_model(torch.hstack(tensors), transformer.layers)
 
-                tensor = init_tensor(n_embedding, dtype=torch.float32)
-                dist.recv(tensor, 1)
-                tensor_to_model(tensor, transformer.tok_embeddings)
+    #             tensor = init_tensor(n_embedding, dtype=torch.float32)
+    #             dist.recv(tensor, 1)
+    #             tensor_to_model(tensor, transformer.tok_embeddings)
 
-        else:
-            dist.gather(tensor)
-            if self.rank == 1:
-                tensor = init_tensor(n_embedding, dtype=torch.float32)
-                model_to_tensor(self.model_fp32.tok_embeddings, tensor)
-                dist.send(
-                    tensor,
-                    0,
-                )
+    #     else:
+    #         dist.gather(tensor)
+    #         if self.rank == 1:
+    #             tensor = init_tensor(n_embedding, dtype=torch.float32)
+    #             model_to_tensor(self.model_fp32.tok_embeddings, tensor)
+    #             dist.send(
+    #                 tensor,
+    #                 0,
+    #             )
 
-        dist.barrier()
-        return transformer
+    #     dist.barrier()
+    #     return transformer
 
     def update(self):
         tensor_to_grad(

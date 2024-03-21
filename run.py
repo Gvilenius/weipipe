@@ -1,6 +1,7 @@
 from weipipe import WeiPipe
 from actpipe import ActPipe
 from dp import DP
+from fsdp import FSDP_allgather as FSDP
 import time
 import os
 from functools import partial
@@ -62,26 +63,18 @@ learning_rate = 5e-4
 # microbatch size
 batch_size = args.batch_size
 
-if args.mode == "act":
-    model = ActPipe(
-        ModelArgs(**model_args),
-        batch_size=batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-    )
-elif args.mode == "wei":
-    model = WeiPipe(
-        ModelArgs(**model_args),
-        batch_size=batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-    )
-elif args.mode == "dp":
-    model = DP(
-        ModelArgs(**model_args),
-        batch_size=batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-    )
-else:
-    assert False
+strategy = {
+    "act": ActPipe,
+    "wei": WeiPipe,
+    "dp": DP,
+    "fsdp": FSDP,
+}
+
+model = strategy[args.mode](
+    ModelArgs(**model_args),
+    batch_size=batch_size,
+    gradient_accumulation_steps=args.gradient_accumulation_steps,
+)
 
 eval_interval = 100
 iter_batches = partial(
