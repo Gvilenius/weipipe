@@ -14,6 +14,7 @@ from utils import (
     tensor_to_grad,
     init_tensor,
     print_rank,
+    params,
 )
 
 
@@ -79,11 +80,6 @@ class Buffer:
         self.index = 1 - self.index
         self.send = self.buffers[self.index]
         self.recv = self.buffers[1 - self.index]
-
-
-def params(m):
-    return m.parameters()
-    # return m.layers.parameters()
 
 
 class WeiPipe:
