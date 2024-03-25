@@ -3,7 +3,7 @@ from actpipe import ActPipe
 from dp import DP
 from fsdp import FSDP_allgather as FSDP
 import time
-import os
+import json
 from functools import partial
 import torch
 from torch import nn
@@ -21,23 +21,20 @@ torch.manual_seed(1234)
 parser = argparse.ArgumentParser()
 parser.add_argument("--local_rank", default=-1, type=int)
 parser.add_argument("--rank", default=-1, type=int)
-parser.add_argument("--batch_size", default=64, type=int)
-parser.add_argument("--gradient_accumulation_steps", default=1, type=int)
-parser.add_argument("--mode", default="wei", type=str)
 args = parser.parse_args()
 
 
-tmpfile = tempfile.NamedTemporaryFile()
-rpc.init_rpc(
-    name="worker",
-    rank=0,
-    world_size=1,
-    rpc_backend_options=rpc.TensorPipeRpcBackendOptions(
-        init_method="file://{}".format(tmpfile.name),
-        _transports=["ibv", "uv"],
-        _channels=["cuda_ipc", "cuda_basic"],
-    ),
-)
+# tmpfile = tempfile.NamedTemporaryFile()
+# rpc.init_rpc(
+#     name="worker",
+#     rank=0,
+#     world_size=1,
+#     rpc_backend_options=rpc.TensorPipeRpcBackendOptions(
+#         init_method="file://{}".format(tmpfile.name),
+#         _transports=["ibv", "uv"],
+#         _channels=["cuda_ipc", "cuda_basic"],
+#     ),
+# )
 
 
 def init_process_group():
@@ -47,21 +44,35 @@ def init_process_group():
 
 init_process_group()
 
+with open("config.json", "r") as f:
+    config = json.load(f)
+
 model_args = dict(
-    dim=288,
-    n_heads=6,
+    dim=config["dim"],
+    n_heads=config["n_heads"],
     n_kv_heads=None,
-    vocab_size=32000,
-    multiple_of=32,
-    max_seq_len=128,
-    dropout=0.0,
-    n_layers=8,
+    vocab_size=config["vocab_size"],
+    multiple_of=config["multiple_of"],
+    max_seq_len=config["max_seq_len"],
+    dropout=config["dropout"],
+    n_layers=config["n_layers"],
 )
 
-learning_rate = 5e-4
+model_size = 12 * config["n_layers"] * config["dim"] ** 2 * 16 / 1024**3
+data_size = config["batch_size"] * config["max_seq_len"] * 2 * 2 / 1024**3
+vocab_size = config["vocab_size"] * config["dim"] * 2 * 2 / 1024**3
+print_rank(0, f"model_size {model_size} G")
+print_rank(0, f"data_size {data_size} G")
+print_rank(0, f"vocab_size {vocab_size} G")
+
 
 # microbatch size
-batch_size = args.batch_size
+batch_size = config["batch_size"]
+learning_rate = config["lr"]
+mode = config["mode"]
+
+gradient_accumulation_steps = config["gradient_accumulation_steps"]
+assert gradient_accumulation_steps % dist.get_world_size() == 0
 
 strategy = {
     "act": ActPipe,
@@ -70,10 +81,10 @@ strategy = {
     "fsdp": FSDP,
 }
 
-model = strategy[args.mode](
+model = strategy[mode](
     ModelArgs(**model_args),
     batch_size=batch_size,
-    gradient_accumulation_steps=args.gradient_accumulation_steps,
+    gradient_accumulation_steps=gradient_accumulation_steps // dist.get_world_size(),
 )
 
 eval_interval = 100
@@ -115,7 +126,8 @@ if __name__ == "__main__":
     start = time.time()
     n_total_samples = 0
 
-    while n_total_samples < 640000 * 100 + 1:
+    # while n_total_samples < 64 * 100 + 1:
+    while iter_num < 50:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
         # if (iter_num + 1) % eval_interval == 0:
@@ -134,7 +146,7 @@ if __name__ == "__main__":
 
         X, Y = next(train_batch_iter)
 
-        if args.mode != "act":
+        if mode != "act":
             loss_rank = 0
             n_total_samples += batch_size * dist.get_world_size()
         else:
@@ -142,8 +154,10 @@ if __name__ == "__main__":
             n_total_samples += batch_size
 
         dt = time.time() - start
+        print_rank(0, f"memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G")
+
         start = time.time()
-        if iter_num % 10 == 0 and dist.get_rank() == loss_rank:
+        if iter_num % 1 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
             print(
                 f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",

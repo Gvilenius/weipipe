@@ -8,7 +8,7 @@ import os
 from model import Transformer, ModelArgs
 
 
-def get_lr(learning_rate, it, warmup_iters=10, lr_decay_iters=100000, min_lr=0.0):
+def get_lr(learning_rate, it, warmup_iters=0, lr_decay_iters=100000, min_lr=0.0):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
         return learning_rate * it / warmup_iters
