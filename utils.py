@@ -62,7 +62,7 @@ def print_rank(rank, *x):
         print(*x)
 
 
-def params(m, embedding=False):
+def params(m, embedding=True):
     if embedding:
         return m.parameters()
     else:

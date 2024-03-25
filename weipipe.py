@@ -149,7 +149,7 @@ class WeiPipe:
 
     def weight_swap(self):
         """At the begining, swap weight between rank i and rank n-i"""
-        dst_rank = self.world_size - 1 - self.rank
+        dst_rank = (self.world_size + 1 - self.rank) % self.world_size
         send_op = dist.P2POp(dist.isend, self.buffers["weight0"].recv, dst_rank)
         recv_op = dist.P2POp(dist.irecv, self.buffers["weight1"].recv, dst_rank)
         reqs = dist.batch_isend_irecv([send_op, recv_op])

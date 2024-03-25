@@ -55,7 +55,7 @@ model_args = dict(
     multiple_of=32,
     max_seq_len=128,
     dropout=0.0,
-    n_layers=6,
+    n_layers=8,
 )
 
 learning_rate = 5e-4
