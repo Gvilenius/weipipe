@@ -162,7 +162,9 @@ if __name__ == "__main__":
                 f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
             )
 
-    if iter_num == 0:
-        print_rank(0, f"memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G")
+        if iter_num == 0:
+            print_rank(
+                0, f"memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G"
+            )
 
         iter_num += 1
