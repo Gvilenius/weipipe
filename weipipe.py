@@ -4,7 +4,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import copy
 from pprint import pprint
-from model import Layer, ModelArgs, Transformer
+from model import Layer, ModelArgs, Transformer, RMSNorm
 from torch.profiler import profile, record_function, ProfilerActivity
 
 from utils import (
@@ -92,12 +92,25 @@ class WeiPipe:
         config.n_layers //= self.world_size
         self.config = config
 
+        self.tok_embeddings = (
+            nn.Embedding(config.vocab_size, config.dim).cuda().bfloat16()
+        )
+        self.dropout = nn.Dropout(config.dropout).cuda()
+        self.norm = RMSNorm(config.dim, eps=config.norm_eps).cuda().bfloat16()
+        self.output = (
+            nn.Linear(config.dim, config.vocab_size, bias=False).cuda().bfloat16()
+        )
+
+        self.tok_embeddings.weight = self.output.weight
+
         self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
 
         self.models = [
             copy.deepcopy(self.model_fp32).bfloat16(),
             Layer(self.rank, self.world_size, self.config).bfloat16().cuda(),
         ]
+
+        self.init()
 
         self.n_parameter = sum(x.numel() for x in params(self.models[0]))
 
@@ -112,12 +125,18 @@ class WeiPipe:
         self.loss_fn = loss_fn
         self.activations = ActivationBuffer()
 
-        self.optimizer = configure_optimizers(self.model_fp32)
+        module = nn.ModuleList([self.model_fp32, self.tok_embeddings, self.norm])
+        self.optimizer = configure_optimizers(module)
+
         self.optimizer.zero_grad()
 
         self.flattern_weight()
         self.counter = {}
         self.gradient_accumulation_steps = gradient_accumulation_steps
+
+    def init(self):
+        torch.nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=0.02)
+        torch.nn.init.normal_(self.output.weight, mean=0.0, std=0.02)
 
     def flattern_weight(self):
         i = 0
@@ -182,29 +201,34 @@ class WeiPipe:
     def forward_step(self, i_layer):
         x = self.activations.top()
         with torch.no_grad():
-            y = self.forward_model()(
-                x, is_first=i_layer == 0, is_last=i_layer == self.world_size - 1
-            )
-        self.activations.push(y)
+            x = self.forward_model()(x)
+        self.activations.push(x)
 
     def backward_step(self, grad=None, i_layer=-1):
-        is_first = i_layer == 0
-        is_last = i_layer == self.world_size - 1
-
         inputs = self.activations.pop().detach()
-        if not is_first:
-            inputs.requires_grad = True
+        inputs.requires_grad = True
+
         # recomputation
-        outputs = self.backward_model()(inputs, is_first=is_first, is_last=is_last)
+        outputs = self.backward_model()(inputs)
         outputs.backward(grad)
 
         return inputs.grad
+
+    def preprocess(self, x):
+        x = self.tok_embeddings(x)
+        x = self.dropout(x)
+        return x
+
+    def postprocess(self, x):
+        x = self.norm(x)
+        x = self.output(x)
+        return x
 
     def calc_grad(self, targets=None):
         outputs = self.activations.pop()
 
         outputs.requires_grad = True
-        loss = self.loss_fn(outputs, targets)
+        loss = self.loss_fn(self.postprocess(outputs), targets)
         loss.backward()
         grad = outputs.grad
         return grad, loss
@@ -222,7 +246,12 @@ class WeiPipe:
         wait(self.weight_swap())
         # ------------------------------
 
-        self.activations.push(inputs[0])
+        embedding_x = []
+        embedding_grad = []
+        x = self.preprocess(inputs[0])
+        self.activations.push(x)
+        embedding_x.append(x)
+
         f_reqs = None
         b_reqs = None
         g_reqs = None
@@ -248,7 +277,10 @@ class WeiPipe:
 
         for i in range(gradient_accumulation_steps - 1):
             self.activations.reverse()
-            self.activations.push(inputs[i + 1])
+
+            x = self.preprocess(inputs[i + 1])
+            self.activations.push(x)
+            embedding_x.append(x)
 
             grad, loss = self.calc_grad(targets[i])
             for j in range(self.world_size):
@@ -265,6 +297,7 @@ class WeiPipe:
                 wait(f_reqs)
                 self.forward_step(i_layer=j)
                 f_reqs = self.forward_weight_flow()
+            embedding_grad.append(grad)
 
         self.activations.reverse()
         grad, loss = self.calc_grad(targets[-1])
@@ -283,10 +316,17 @@ class WeiPipe:
             wait(b_reqs)
             if i <= self.rank:
                 grad = self.backward_step(grad=grad, i_layer=self.rank - i)
+                if i == self.rank:
+                    embedding_grad.append(grad)
+
             b_reqs = self.backward_weight_flow()
 
             wait(g_reqs)
             g_reqs = self.grad_flow()
+
+        print(len(embedding_x), len(embedding_grad))
+        for i in range(gradient_accumulation_steps):
+            embedding_x[i].backward(embedding_grad[i])
 
         wait(f_reqs)
         wait(b_reqs)

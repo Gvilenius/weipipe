@@ -450,12 +450,6 @@ class Layer(nn.Module):
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
-        self.dropout = nn.Dropout(config.dropout)
-
-        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
-
         # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
@@ -471,25 +465,14 @@ class Layer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, tokens, is_first=False, is_last=False):
-        if is_first:
-            _bsz, seq_len = tokens.shape
-        else:
-            _bsz, seq_len, _ = tokens.shape
+    def forward(self, tokens):
+        _bsz, seq_len, _ = tokens.shape
 
         freqs_cos = self.freqs_cos[:seq_len]
         freqs_sin = self.freqs_sin[:seq_len]
         h = tokens
 
-        if is_first:
-            h = self.tok_embeddings(h)
-            h = self.dropout(h)
-
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
-
-        if is_last:
-            h = self.norm(h)
-            h = self.output(h)
 
         return h

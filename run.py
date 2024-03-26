@@ -127,7 +127,7 @@ if __name__ == "__main__":
     n_total_samples = 0
 
     # while n_total_samples < 64 * 100 + 1:
-    while iter_num < 50:
+    while iter_num < 100:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
         # if (iter_num + 1) % eval_interval == 0:
@@ -154,7 +154,6 @@ if __name__ == "__main__":
             n_total_samples += batch_size
 
         dt = time.time() - start
-        print_rank(0, f"memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G")
 
         start = time.time()
         if iter_num % 1 == 0 and dist.get_rank() == loss_rank:
@@ -162,5 +161,8 @@ if __name__ == "__main__":
             print(
                 f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
             )
+
+	if iter_num == 0:
+	    print_rank(0, f"memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G")
 
         iter_num += 1

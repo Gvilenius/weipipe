@@ -62,11 +62,8 @@ def print_rank(rank, *x):
         print(*x)
 
 
-def params(m, embedding=True):
-    if embedding:
-        return m.parameters()
-    else:
-        return m.layers.parameters()
+def params(m):
+    return m.parameters()
 
 
 def grad_to_tensor(model, tensor):
@@ -89,42 +86,16 @@ def tensor_to_grad(tensor, model):
         i += n
 
 
-# def tensor_to_model(tensor, model):
-#     i = 0
-#     if transfer_embedding:
-#         for p in model.parameters():
-#             n = p.data.numel()
-#             p.data = tensor.narrow(0, i, n).reshape(p.data.shape)
-#             i += n
-#     else:
-#         for p in model.layers.parameters():
-#             n = p.data.numel()
-#             p.data = tensor.narrow(0, i, n).reshape(p.data.shape)
-#             i += n
-
-
 def init_tensor(n, dtype=torch.bfloat16, init_func=torch.empty):
     return init_func(n).cuda().to(dtype)
 
 
-# def model_to_tensor(model, tensor):
-#     i = 0
-#     if transfer_embedding:
-#         for p in model.parameters():
-#             data = p.data.flatten()
-#             n = len(data)
-#             tensor[i : i + n] = data
-#             i += n
-#     else:
-#         for p in model.layers.parameters():
-#             data = p.data.flatten()
-#             n = len(data)
-#             tensor[i : i + n] = data
-#             i += n
-
-
 def configure_optimizers(
-    model, weight_decay=1e-1, learning_rate=5e-4, betas=(0.9, 0.95), device_type="cuda"
+    model,
+    weight_decay=1e-1,
+    learning_rate=5e-4,
+    betas=(0.9, 0.95),
+    device_type="cuda",
 ):
     # start with all of the candidate parameters
     param_dict = {pn: p for pn, p in model.named_parameters()}
