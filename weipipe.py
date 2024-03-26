@@ -324,7 +324,6 @@ class WeiPipe:
             wait(g_reqs)
             g_reqs = self.grad_flow()
 
-        print(len(embedding_x), len(embedding_grad))
         for i in range(gradient_accumulation_steps):
             embedding_x[i].backward(embedding_grad[i])
 
