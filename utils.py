@@ -82,7 +82,7 @@ def tensor_to_grad(tensor, model):
     i = 0
     for p in params(model):
         n = p.data.numel()
-        p.grad = tensor.narrow(0, i, n).reshape(p.data.shape).float()
+        p.grad = tensor[i : i + n].reshape(p.data.shape).float()
         i += n
 
 

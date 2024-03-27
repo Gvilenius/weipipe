@@ -405,16 +405,16 @@ class WeiPipe:
         num_params_embedding = num_params(self.model_16.embedding)
         num_params_norm = num_params(self.model_16.norm)
         grad_buffer = init_tensor(num_params_embedding + num_params_norm)
+
         grad_to_tensor(self.model_16.embedding, grad_buffer[0:num_params_embedding])
         grad_to_tensor(self.model_16.norm, grad_buffer[num_params_embedding:])
 
         dist.all_reduce(grad_buffer)
-
         grad_buffer /= self.world_size * self.gradient_accumulation_steps
 
-        tensor_to_grad(grad_buffer[0:num_params_embedding], self.model_32.embedding)
         tensor_to_grad(grad_buffer[0:num_params_embedding], self.model_32.output)
         tensor_to_grad(grad_buffer[num_params_embedding:], self.model_32.norm)
+        del grad_buffer
 
         self.buffers["grad"].send /= self.world_size * self.gradient_accumulation_steps
 
