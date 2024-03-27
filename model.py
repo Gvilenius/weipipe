@@ -188,7 +188,7 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
@@ -200,7 +200,6 @@ class TransformerBlock(nn.Module):
             multiple_of=args.multiple_of,
             dropout=args.dropout,
         )
-        self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
@@ -435,14 +434,13 @@ class Transformer(nn.Module):
 
 
 class Layer(nn.Module):
-    def __init__(self, rank, world_size, config):
+    def __init__(self, config):
         super().__init__()
-        self.rank = rank
-        self.world_size = world_size
         self.config = config
         self.layers = nn.ModuleList()
+
         for i in range(config.n_layers):
-            self.layers.append(TransformerBlock(rank, config))
+            self.layers.append(TransformerBlock(config))
 
         freqs_cos, freqs_sin = precompute_freqs_cis(
             config.dim // config.n_heads, config.max_seq_len

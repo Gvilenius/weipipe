@@ -14,11 +14,8 @@ from utils import (
     tensor_to_grad,
     init_tensor,
     print_rank,
+    params,
 )
-
-
-def params(m):
-    return m.parameters()
 
 
 class DP:
@@ -75,7 +72,7 @@ class DP:
 
         for i in range(gradient_accumulation_steps):
             x, y = inputs[i], targets[i]
-            y_ = self.models[0].forward(x, True, True)
+            y_ = self.models[0].forward(x)
             loss = self.loss_fn(y_, y)
             loss.backward()
 

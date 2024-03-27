@@ -127,7 +127,7 @@ if __name__ == "__main__":
     n_total_samples = 0
 
     # while n_total_samples < 64 * 100 + 1:
-    while iter_num < 100:
+    while iter_num < config["iter_nums"]:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
         # if (iter_num + 1) % eval_interval == 0:
@@ -161,6 +161,9 @@ if __name__ == "__main__":
             print(
                 f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
             )
+            # print(
+            #     f"{iter_num} | lr {lr:e} | time {dt*1000 :.2f}ms",
+            # )
 
         if iter_num == 0:
             print_rank(

@@ -1,14 +1,15 @@
 {
-    "batch_size" : 64,
-    "gradient_accumulation_steps": 8,
+    "batch_size" : 256,
+    "gradient_accumulation_steps": 4,
     "mode":"wei",
-    "dim" : 1024,
-    "n_layers" : 16,
-    "max_seq_len" : 1024,
+    "dim" : 288,
+    "n_layers" : 4,
+    "max_seq_len" : 128,
     "n_heads" : 6,
     "vocab_size": 32000,
     "multiple_of" : 32, 
     "dropout": 0.0,
-    "fsdp": false,
-    "lr" : 5e-4
+    "fsdp": true,
+    "lr" : 5e-4,
+    "iter_nums" : 100
 }

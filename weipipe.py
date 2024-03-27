@@ -82,6 +82,35 @@ class Buffer:
         self.recv = self.buffers[1 - self.index]
 
 
+def num_params(model):
+    return sum(x.numel() for x in params(model))
+
+
+def copy_gradients(model_src, model_dest):
+    for param_src, param_dest in zip(model_src.parameters(), model_dest.parameters()):
+        if param_dest.grad is None:
+            param_dest.grad = torch.zeros_like(param_dest.data)
+        param_dest.grad.data.copy_(param_src.grad.data)
+
+    model_src.zero_grad()
+
+
+def copy_weights(model_src, model_dest):
+    for param_src, param_dest in zip(model_src.parameters(), model_dest.parameters()):
+        param_dest.data.copy_(param_src.data)
+
+
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.embedding = nn.Embedding(config.vocab_size, config.dim)
+        self.decoders = Layer(config)
+        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
+        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.dropout = nn.Dropout(config.dropout)
+        self.embedding.weight = self.output.weight
+
+
 class WeiPipe:
     def __init__(self, config, batch_size, gradient_accumulation_steps=1):
         # Setup world info
@@ -92,65 +121,52 @@ class WeiPipe:
         config.n_layers //= self.world_size
         self.config = config
 
-        self.tok_embeddings = (
-            nn.Embedding(config.vocab_size, config.dim).cuda().bfloat16()
-        )
-        self.dropout = nn.Dropout(config.dropout).cuda()
-        self.norm = RMSNorm(config.dim, eps=config.norm_eps).cuda().bfloat16()
-        self.output = (
-            nn.Linear(config.dim, config.vocab_size, bias=False).cuda().bfloat16()
-        )
+        self.model_32 = Model(config).cuda()
+        self.model_16 = Model(config).cuda().bfloat16()
 
-        self.tok_embeddings.weight = self.output.weight
+        # forward backup
+        self.decoders = Layer(self.config).cuda().bfloat16()
 
-        self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
+        copy_weights(self.model_32.output, self.model_16.output)
+        copy_weights(self.model_32.norm, self.model_16.norm)
 
-        self.models = [
-            copy.deepcopy(self.model_fp32).bfloat16(),
-            Layer(self.rank, self.world_size, self.config).bfloat16().cuda(),
-        ]
-
-        self.init()
-
-        self.n_parameter = sum(x.numel() for x in params(self.models[0]))
+        num_decoders_params = num_params(self.decoders)
 
         self.buffers = {
-            "weight0": Buffer(self.n_parameter),
-            "weight1": Buffer(self.n_parameter),
-            "grad": Buffer(self.n_parameter),
+            "weight0": Buffer(num_decoders_params),
+            "weight1": Buffer(num_decoders_params),
+            "grad": Buffer(num_decoders_params),
         }
+
+        self.flatten_weight()
 
         self.current_model_index = 0
 
         self.loss_fn = loss_fn
         self.activations = ActivationBuffer()
 
-        module = nn.ModuleList([self.model_fp32, self.tok_embeddings, self.norm])
-        self.optimizer = configure_optimizers(module)
-
+        self.optimizer = configure_optimizers(self.model_32)
         self.optimizer.zero_grad()
 
-        self.flattern_weight()
         self.counter = {}
         self.gradient_accumulation_steps = gradient_accumulation_steps
 
-    def init(self):
-        torch.nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=0.02)
-        torch.nn.init.normal_(self.output.weight, mean=0.0, std=0.02)
-
-    def flattern_weight(self):
+    def flatten_weight(self):
         i = 0
-        for p in params(self.models[0]):
+        for p in params(self.model_32.decoders):
             n = p.data.numel()
             self.buffers["weight0"].recv[i : i + n] = p.data.view(-1)
             i += n
 
-        for j in range(2):
+        def flatten(model, tensor):
             i = 0
-            for p in params(self.models[j]):
+            for p in params(model):
                 n = p.data.numel()
-                p.data = self.buffers[f"weight{j}"].recv[i : i + n].view(p.data.shape)
+                p.data = tensor[i : i + n].view(p.data.shape)
                 i += n
+
+        flatten(self.model_16.decoders, self.buffers[f"weight{0}"].recv)
+        flatten(self.decoders, self.buffers[f"weight{1}"].recv)
 
     def flow_op(self, idx):
         prev_rank = (self.rank + self.world_size - 1) % self.world_size
@@ -182,18 +198,10 @@ class WeiPipe:
 
     def grad_flow(self):
         grad_buffer = self.buffers["grad"]
-        grad_to_tensor(self.backward_model(), grad_buffer.send)
+        grad_to_tensor(self.model_16.decoders, grad_buffer.send)
         reqs = dist.batch_isend_irecv(self.flow_op("grad"))
         self.buffers["grad"].pingpong()
         return reqs
-
-    def forward_model(self):
-        self.current_model_index = 1
-        return self.models[self.current_model_index]
-
-    def backward_model(self):
-        self.current_model_index = 0
-        return self.models[self.current_model_index]
 
     def forward(self, x):
         return self.get_full_transformer(x)
@@ -201,7 +209,7 @@ class WeiPipe:
     def forward_step(self, i_layer):
         x = self.activations.top()
         with torch.no_grad():
-            x = self.forward_model()(x)
+            x = self.decoders(x)
         self.activations.push(x)
 
     def backward_step(self, grad=None, i_layer=-1):
@@ -209,19 +217,19 @@ class WeiPipe:
         inputs.requires_grad = True
 
         # recomputation
-        outputs = self.backward_model()(inputs)
+        outputs = self.model_16.decoders(inputs)
         outputs.backward(grad)
 
         return inputs.grad
 
     def preprocess(self, x):
-        x = self.tok_embeddings(x)
-        x = self.dropout(x)
+        x = self.model_16.embedding(x)
+        x = self.model_16.dropout(x)
         return x
 
     def postprocess(self, x):
-        x = self.norm(x)
-        x = self.output(x)
+        x = self.model_16.norm(x)
+        x = self.model_16.output(x)
         return x
 
     def calc_grad(self, targets=None):
@@ -236,7 +244,6 @@ class WeiPipe:
     # mark
     def forward_backward_step(self, inputs, targets=None):
         ### fuck async
-
         gradient_accumulation_steps = self.gradient_accumulation_steps
         bsz, seq_len = inputs.shape
         micro_bsz = bsz // gradient_accumulation_steps
@@ -255,6 +262,7 @@ class WeiPipe:
         f_reqs = None
         b_reqs = None
         g_reqs = None
+
         for _ in range(self.rank):
             wait(f_reqs)
             f_reqs = self.forward_weight_flow()
@@ -325,9 +333,7 @@ class WeiPipe:
             g_reqs = self.grad_flow()
 
         for i in range(gradient_accumulation_steps):
-            embedding_x[i].backward(
-                embedding_grad[i] / gradient_accumulation_steps / self.world_size
-            )
+            embedding_x[i].backward(embedding_grad[i])
 
         wait(f_reqs)
         wait(b_reqs)
@@ -342,12 +348,12 @@ class WeiPipe:
             param_group["lr"] = lr
 
     # def get_full_transformer(self):
-    #     n = sum(x.numel() for x in self.model_fp32.layers.parameters())
+    #     n = sum(x.numel() for x in self.layer_fp32.layers.parameters())
     #     n_embedding = sum(
-    #         x.numel() for x in self.model_fp32.tok_embeddings.parameters()
+    #         x.numel() for x in self.layer_fp32.tok_embeddings.parameters()
     #     )
     #     tensor = init_tensor(n, dtype=torch.float32)
-    #     model_to_tensor(self.model_fp32.layers, tensor)
+    #     model_to_tensor(self.layer_fp32.layers, tensor)
 
     #     sector_len = len(tensor)
     #     transformer = None
@@ -355,22 +361,22 @@ class WeiPipe:
     #     if self.rank == 0:
     #         transformer = Transformer(self.config).cuda()
     #         if self.world_size == 1:
-    #             transformer.layers = self.model_fp32.layers
-    #             transformer.norm = self.model_fp32.norm
-    #             transformer.output = self.model_fp32.output
+    #             transformer.layers = self.layer_fp32.layers
+    #             transformer.norm = self.layer_fp32.norm
+    #             transformer.output = self.layer_fp32.output
 
     #             tensor = init_tensor(n_embedding, dtype=torch.float32)
-    #             model_to_tensor(self.model_fp32.tok_embeddings, tensor)
+    #             model_to_tensor(self.layer_fp32.tok_embeddings, tensor)
     #             tensor_to_model(tensor, transformer.tok_embeddings)
-    #             # transformer.tok_embeddings = self.model_fp32.tok_embeddings
+    #             # transformer.tok_embeddings = self.layer_fp32.tok_embeddings
     #         else:
     #             tensors = [
     #                 torch.empty(sector_len).float().cuda()
     #                 for i in range(self.world_size)
     #             ]
 
-    #             transformer.norm = self.model_fp32.norm
-    #             transformer.output = self.model_fp32.output
+    #             transformer.norm = self.layer_fp32.norm
+    #             transformer.output = self.layer_fp32.output
 
     #             dist.gather(tensor, tensors)
     #             tensors = tensors[1:] + [tensor]
@@ -385,7 +391,7 @@ class WeiPipe:
     #         dist.gather(tensor)
     #         if self.rank == 1:
     #             tensor = init_tensor(n_embedding, dtype=torch.float32)
-    #             model_to_tensor(self.model_fp32.tok_embeddings, tensor)
+    #             model_to_tensor(self.layer_fp32.tok_embeddings, tensor)
     #             dist.send(
     #                 tensor,
     #                 0,
@@ -395,21 +401,39 @@ class WeiPipe:
     #     return transformer
 
     def update(self):
+        # exchange params for embedding
+        num_params_embedding = num_params(self.model_16.embedding)
+        num_params_norm = num_params(self.model_16.norm)
+        grad_buffer = init_tensor(num_params_embedding + num_params_norm)
+        grad_to_tensor(self.model_16.embedding, grad_buffer[0:num_params_embedding])
+        grad_to_tensor(self.model_16.norm, grad_buffer[num_params_embedding:])
+
+        dist.all_reduce(grad_buffer)
+
+        grad_buffer /= self.world_size * self.gradient_accumulation_steps
+
+        tensor_to_grad(grad_buffer[0:num_params_embedding], self.model_32.embedding)
+        tensor_to_grad(grad_buffer[0:num_params_embedding], self.model_32.output)
+        tensor_to_grad(grad_buffer[num_params_embedding:], self.model_32.norm)
+
+        self.buffers["grad"].send /= self.world_size * self.gradient_accumulation_steps
+
         tensor_to_grad(
-            self.buffers["grad"].send
-            / self.world_size
-            / self.gradient_accumulation_steps,
-            self.model_fp32,
+            self.buffers["grad"].send,
+            self.model_32.decoders,
         )
         self.buffers["grad"].send.zero_()
-        self.backward_model().zero_grad()
+        self.model_16.decoders.zero_grad()
 
-        nn.utils.clip_grad_norm_(params(self.model_fp32), 1.0)
+        nn.utils.clip_grad_norm_(params(self.model_32), 1.0)
         self.optimizer.step()
         self.optimizer.zero_grad()
 
+        copy_weights(self.model_32.output, self.model_16.output)
+        copy_weights(self.model_32.norm, self.model_16.norm)
+
         i = 0
-        for p in params(self.model_fp32):
+        for p in params(self.model_32.decoders):
             n = p.data.numel()
             self.buffers["weight0"].recv[i : i + n] = p.data.view(-1).bfloat16()
             i += n

@@ -171,10 +171,6 @@ model.to(device)
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
 
-# optimizer
-optimizer = model.configure_optimizers(
-    weight_decay, learning_rate, (beta1, beta2), device_type
-)
 # Ignore the `freqs_cis` buffer so that DDP does not broadcast it at
 # construction time since NCCL does not support `ComplexFloat`
 prefix = "_orig_mod." if compile else ""
@@ -183,7 +179,15 @@ model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
 if config["fsdp"]:
     my_policy = partial(size_based_auto_wrap_policy, min_num_params=20000)
     model = FSDP(model, auto_wrap_policy=my_policy)
+    # optimizer
+    optimizer = model.configure_optimizers(
+        weight_decay, learning_rate, (beta1, beta2), device_type
+    )
 else:
+    # optimizer
+    optimizer = model.configure_optimizers(
+        weight_decay, learning_rate, (beta1, beta2), device_type
+    )
     model = DDP(model, device_ids=[ddp_local_rank])
 
 checkpoint = None  # free up memory
@@ -211,7 +215,7 @@ t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
-while iter_num < 50:
+while iter_num < config["iter_nums"]:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
@@ -260,8 +264,9 @@ while iter_num < 50:
     if iter_num > max_iters:
         break
 
-    print(
-        f"rank{ddp_local_rank} memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
-    )
+    if iter_num == 0:
+        print(
+            f"rank{ddp_local_rank} memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
+        )
 if ddp:
     destroy_process_group()

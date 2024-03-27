@@ -37,7 +37,11 @@ class ActPipe:
         self.gradient_accumulation_steps = gradient_accumulation_steps
 
         self.model_fp32 = Layer(self.rank, self.world_size, self.config).float().cuda()
-        self.act_shape = (self.batch_size//self.gradient_accumulation_steps, self.config.max_seq_len, self.config.dim)
+        self.act_shape = (
+            self.batch_size // self.gradient_accumulation_steps,
+            self.config.max_seq_len,
+            self.config.dim,
+        )
         self.model = copy.deepcopy(self.model_fp32).bfloat16()
 
         self.loss_fn = loss_fn
@@ -68,7 +72,7 @@ class ActPipe:
         loss.backward()
         return outputs.grad, loss
 
-    def forward_backward_step(self, inputs, targets, ):
+    def forward_backward_step(self, inputs, targets):
         gradient_accumulation_steps = self.gradient_accumulation_steps
         bsz, seq_len = inputs.shape
         micro_bsz = bsz // gradient_accumulation_steps
