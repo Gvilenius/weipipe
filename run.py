@@ -16,6 +16,8 @@ from utils import get_lr, print_rank
 from model import ModelArgs
 from torch.profiler import profile, record_function, ProfilerActivity
 
+import os
+
 torch.manual_seed(1234)
 
 parser = argparse.ArgumentParser()
@@ -130,15 +132,15 @@ if __name__ == "__main__":
     while iter_num < config["iter_nums"]:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
-        # if (iter_num + 1) % eval_interval == 0:
-        #     transformer = model.get_full_transformer()
 
-        #     if dist.get_rank() == 0:
-        #         loss = estimate_loss(transformer)
-        #         print(f" loss eval is {loss}")
-        #         out_dir = "out"
-        #         print(f"saving checkpoint to {out_dir}")
-        #         transformer.export(os.path.join(out_dir, "model.bin"))
+        if (iter_num) % eval_interval == 0:
+            transformer = model.get_full_transformer()
+            if dist.get_rank() == 0:
+                loss = estimate_loss(transformer)
+                print(f" loss eval is {loss}")
+                out_dir = "out"
+                print(f"saving checkpoint to {out_dir}")
+                transformer.export(os.path.join(out_dir, "model.bin"))
         # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         loss = model.forward_backward_step(X, Y)
         # print(prof.key_averages().table(sort_by="cuda_time"))
