@@ -41,7 +41,7 @@ args = parser.parse_args()
 
 def init_process_group():
     dist.init_process_group(backend="nccl")
-    torch.cuda.set_device(dist.get_rank())
+    torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
 
 
 init_process_group()

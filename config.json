@@ -11,5 +11,5 @@
     "dropout": 0.0,
     "fsdp": true,
     "lr" : 5e-4,
-    "iter_nums" : 100
+    "iter_nums" : 300
 }
