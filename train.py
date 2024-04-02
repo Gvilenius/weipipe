@@ -271,7 +271,7 @@ while iter_num < config["iter_nums"]:
             f"rank{ddp_local_rank} memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
         )
 
-if torch.distributed.get_rank() == 0:
+if config["output"] and torch.distributed.get_rank() == 0:
     with open("result-fsdp", "a") as f:
         f.write(
             f'{config["batch_size"]}-{config["gradient_accumulation_steps"]}: {dt:.2f}\n'

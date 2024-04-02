@@ -11,9 +11,9 @@ for batch_size in [72, 144, 216, 288]:
             config["gradient_accumulation_steps"] = acc_steps
             json.dump(config, f, indent=4)
 
-    os.system(
-        'torchrun --nproc-per-node=3 --nnodes=2 --node-rank={rank} --master-addr="10.233.99.178" --master-port=8887  train.py'
-    )
-    os.system(
-        'torchrun --nproc-per-node=3 --nnodes=2 --node-rank={rank} --master-addr="10.233.99.178" --master-port=8887  run.py'
-    )
+        os.system(
+            f'torchrun --nproc-per-node=3 --nnodes=2 --node-rank={rank} --master-addr="10.233.99.178" --master-port=8887  train.py'
+        )
+        os.system(
+            f'torchrun --nproc-per-node=3 --nnodes=2 --node-rank={rank} --master-addr="10.233.99.178" --master-port=8887  run.py'
+        )

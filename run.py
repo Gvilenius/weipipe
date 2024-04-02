@@ -173,7 +173,7 @@ if __name__ == "__main__":
             )
 
         iter_num += 1
-    if dist.get_rank() == 0:
+    if config["output"] and dist.get_rank() == 0:
         with open("result-wei", "a") as f:
             f.write(
                 f'{config["batch_size"]}-{config["gradient_accumulation_steps"]}: {dt:.2f}\n'
