@@ -89,7 +89,7 @@ model = strategy[mode](
     gradient_accumulation_steps=gradient_accumulation_steps // dist.get_world_size(),
 )
 
-eval_interval = 100
+eval_interval = 500
 iter_batches = partial(
     Task.iter_batches,
     batch_size=batch_size,
@@ -133,7 +133,7 @@ if __name__ == "__main__":
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
 
-        if (iter_num) % eval_interval == 0:
+        if (iter_num + 1) % eval_interval == 0:
             transformer = model.get_full_transformer()
             if dist.get_rank() == 0:
                 loss = estimate_loss(transformer)
@@ -173,3 +173,8 @@ if __name__ == "__main__":
             )
 
         iter_num += 1
+    if dist.get_rank() == 0:
+        with open("result-wei", "a") as f:
+            f.write(
+                f'{config["batch_size"]}-{config["gradient_accumulation_steps"]}: {dt:.2f}\n'
+            )

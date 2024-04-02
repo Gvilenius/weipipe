@@ -54,8 +54,10 @@ wandb_log = False  # disabled by default
 wandb_project = "llamac"
 wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 # data
-batch_size = 64  # if gradient_accumulation_steps > 1, this is the micro-batch size
-max_seq_len = 128
+batch_size = config[
+    "batch_size"
+]  # if gradient_accumulation_steps > 1, this is the micro-batch size
+max_seq_len = config["max_seq_len"]
 dataset = "tinystories"  # tinystories|tinyshakespeare
 # model
 dim = config["dim"]
@@ -68,7 +70,7 @@ gradient_accumulation_steps = config[
     "gradient_accumulation_steps"
 ]  # used to simulate larger batch sizes
 learning_rate = config["lr"]  # max learning rate
-max_iters = 100000  # total number of training iterations
+max_iters = config["iter_nums"]  # total number of training iterations
 
 weight_decay = 1e-1
 beta1 = 0.9
@@ -267,6 +269,12 @@ while iter_num < config["iter_nums"]:
     if iter_num == 0:
         print(
             f"rank{ddp_local_rank} memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
+        )
+
+if torch.distributed.get_rank() == 0:
+    with open("result-fsdp", "a") as f:
+        f.write(
+            f'{config["batch_size"]}-{config["gradient_accumulation_steps"]}: {dt:.2f}\n'
         )
 if ddp:
     destroy_process_group()
