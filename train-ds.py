@@ -17,6 +17,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import math
+import deepspeed as ds
 import os
 import time
 from contextlib import nullcontext
@@ -29,12 +30,6 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from tinystories import Task
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.wrap import (
-    size_based_auto_wrap_policy,
-    enable_wrap,
-    wrap,
-)
 import json
 
 with open("config.json", "r") as f:
@@ -49,10 +44,6 @@ eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = False  # if True, always save a checkpoint after each eval
 init_from = "scratch"  # 'scratch' or 'resume'
-# wandb logging
-wandb_log = False  # disabled by default
-wandb_project = "llamac"
-wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 # data
 batch_size = config[
     "batch_size"
@@ -100,7 +91,8 @@ min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
-init_process_group(backend="nccl")
+
+
 ddp_rank = int(os.environ["RANK"])
 ddp_local_rank = int(os.environ["LOCAL_RANK"])
 ddp_world_size = int(os.environ["WORLD_SIZE"])
@@ -110,8 +102,6 @@ master_process = ddp_rank == 0  # this process will do logging, checkpointing et
 seed_offset = ddp_rank  # each process gets a different seed
 # world_size number of processes will be training simultaneously, so we can scale
 # down the desired gradient accumulation iterations per process proportionally
-assert gradient_accumulation_steps % ddp_world_size == 0
-gradient_accumulation_steps //= ddp_world_size
 
 tokens_per_iter = (
     gradient_accumulation_steps * ddp_world_size * batch_size * max_seq_len
@@ -134,18 +124,13 @@ ptdtype = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
 }[dtype]
-ctx = (
-    nullcontext()
-    if device_type == "cpu"
-    else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-)
 
 
 # task-specific setup
 task = Task
 iter_batches = partial(
     task.iter_batches,
-    batch_size=batch_size // gradient_accumulation_steps,
+    batch_size=batch_size,
     max_seq_len=max_seq_len,
     device=device,
     num_workers=0,
@@ -171,26 +156,38 @@ model = Transformer(gptconf)
 
 model.to(device)
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
 
 # Ignore the `freqs_cis` buffer so that DDP does not broadcast it at
 # construction time since NCCL does not support `ComplexFloat`
 prefix = "_orig_mod." if compile else ""
 model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
 
-if config["fsdp"]:
-    my_policy = partial(size_based_auto_wrap_policy, min_num_params=20000)
-    model = FSDP(model, auto_wrap_policy=my_policy)
-    # optimizer
-    optimizer = model.configure_optimizers(
-        weight_decay, learning_rate, (beta1, beta2), device_type
-    )
-else:
-    # optimizer
-    optimizer = model.configure_optimizers(
-        weight_decay, learning_rate, (beta1, beta2), device_type
-    )
-    model = DDP(model, device_ids=[ddp_local_rank])
+ds_config = {
+    "train_micro_batch_size_per_gpu": batch_size,
+    # "amp": {"enabled": True, "opt_level": "O2"},
+    "optimizer": {
+        "type": "Adam",
+        "params": {"lr": 5e-4, "betas": [beta1, beta2], "weight_decay": weight_decay},
+    },
+    "gradient_clipping": grad_clip,
+    "bf16": {
+        "enabled": True,
+    },
+    "gradient_accumulation_steps": gradient_accumulation_steps,
+    "zero_optimization": {
+        "stage": 3,
+    },
+}
+# optimizer
+# optimizer = model.configure_optimizers(
+#     weight_decay, learning_rate, (beta1, beta2), device_type
+# )
+
+model, _, _, _ = ds.initialize(
+    model=model, model_parameters=model.parameters(), config=ds_config
+)
+model.train()
+
 
 checkpoint = None  # free up memory
 
@@ -220,31 +217,13 @@ running_mfu = -1.0
 while iter_num < config["iter_nums"]:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
+    logits = model(X, Y)
+    loss = raw_model.last_loss
+    model.backward(loss)
+    # immediately async prefetch next batch while model is doing the forward pass on the GPU
+    X, Y = next(train_batch_iter)
 
-    for micro_step in range(gradient_accumulation_steps):
-        model.require_backward_grad_sync = micro_step == gradient_accumulation_steps - 1
-        with ctx:
-            logits = model(X, Y)
-            loss = raw_model.last_loss
-            loss = loss / gradient_accumulation_steps
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = next(train_batch_iter)
-
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
-    # clip the gradient
-    if grad_clip != 0.0:
-        # scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    optimizer.step()
-
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+    model.step()
 
     # timing and logging
     t1 = time.time()
@@ -252,13 +231,8 @@ while iter_num < config["iter_nums"]:
     t0 = t1
     if iter_num % log_interval == 0 and master_process:
         # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-        lossf = loss.item() * gradient_accumulation_steps
-        if local_iter_num >= 5:  # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        print(
-            f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms | mfu {running_mfu*100:.2f}%"
-        )
+        lossf = loss.item()
+        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
 
@@ -272,9 +246,7 @@ while iter_num < config["iter_nums"]:
         )
 
 if config["output"] and torch.distributed.get_rank() == 0:
-    with open("result-fsdp", "a") as f:
+    with open("result-ds", "a") as f:
         f.write(
             f'{config["batch_size"]}-{config["gradient_accumulation_steps"]}: {dt:.2f}\n'
         )
-if ddp:
-    destroy_process_group()

@@ -1,6 +1,6 @@
 {
-    "batch_size": 4,
-    "gradient_accumulation_steps": 12,
+    "batch_size": 64,
+    "gradient_accumulation_steps": 2,
     "mode": "wei",
     "dim": 288,
     "n_layers": 4,
@@ -11,6 +11,6 @@
     "dropout": 0.0,
     "fsdp": true,
     "lr": 0.0005,
-    "iter_nums": 3,
+    "iter_nums": 30,
     "output" : false
 }
