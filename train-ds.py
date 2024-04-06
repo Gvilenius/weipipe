@@ -16,6 +16,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
 
+import torch.nn.functional as F
 import math
 import deepspeed as ds
 import os
@@ -103,9 +104,13 @@ seed_offset = ddp_rank  # each process gets a different seed
 # world_size number of processes will be training simultaneously, so we can scale
 # down the desired gradient accumulation iterations per process proportionally
 
+gradient_accumulation_steps //= ddp_world_size
+batch_size //= gradient_accumulation_steps
+
 tokens_per_iter = (
     gradient_accumulation_steps * ddp_world_size * batch_size * max_seq_len
 )
+
 if master_process:
     print(f"tokens per iteration will be: {tokens_per_iter:,}")
     print(
@@ -217,13 +222,12 @@ running_mfu = -1.0
 while iter_num < config["iter_nums"]:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
-    logits = model(X, Y)
-    loss = raw_model.last_loss
-    model.backward(loss)
+    for i in range(gradient_accumulation_steps):
+        loss = model(X, Y)
+        model.backward(loss)
+        model.step()
     # immediately async prefetch next batch while model is doing the forward pass on the GPU
     X, Y = next(train_batch_iter)
-
-    model.step()
 
     # timing and logging
     t1 = time.time()

@@ -284,7 +284,7 @@ class Transformer(nn.Module):
             )  # note: using list [-1] to preserve the time dim
             self.last_loss = None
 
-        return logits
+        return self.last_loss
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters

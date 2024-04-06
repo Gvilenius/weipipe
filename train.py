@@ -112,6 +112,7 @@ seed_offset = ddp_rank  # each process gets a different seed
 # down the desired gradient accumulation iterations per process proportionally
 assert gradient_accumulation_steps % ddp_world_size == 0
 gradient_accumulation_steps //= ddp_world_size
+batch_size //= gradient_accumulation_steps
 
 tokens_per_iter = (
     gradient_accumulation_steps * ddp_world_size * batch_size * max_seq_len
@@ -145,7 +146,7 @@ ctx = (
 task = Task
 iter_batches = partial(
     task.iter_batches,
-    batch_size=batch_size // gradient_accumulation_steps,
+    batch_size=batch_size,
     max_seq_len=max_seq_len,
     device=device,
     num_workers=0,
