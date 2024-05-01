@@ -161,13 +161,13 @@ class Attention(nn.Module):
             scores = (
                 scores + self.mask[:, :, :seqlen, :seqlen]
             )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = deepspeed.checkpointing.checkpoint(
-                F.softmax, scores.float(), dim=-1
-            ).type_as(xq)
-            scores = deepspeed.checkpointing.checkpoint(self.attn_dropout, scores)
+            # scores = deepspeed.checkpointing.checkpoint(
+            #     F.softmax, scores.float(), dim=-1
+            # ).type_as(xq)
+            # scores = deepspeed.checkpointing.checkpoint(self.attn_dropout, scores)
 
-            # scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            # scores = self.attn_dropout(scores)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = self.attn_dropout(scores)
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
 
         # restore time as batch dimension and concat heads

@@ -36,6 +36,7 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--stage", default=3, type=int)
+parser.add_argument("--checkpoint", action="store_true")
 args = parser.parse_args()
 
 with open("config.json", "r") as f:
@@ -173,7 +174,8 @@ prefix = "_orig_mod." if compile else ""
 model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
 
 
-ds.checkpointing.configure(None)
+if args.checkpoint:
+    ds.checkpointing.configure(None)
 ds_config = {
     "train_micro_batch_size_per_gpu": batch_size,
     # "amp": {"enabled": True, "opt_level": "O2"},
