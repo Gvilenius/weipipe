@@ -134,7 +134,15 @@ if __name__ == "__main__":
     n_total_samples = 0
 
     # while n_total_samples < 64 * 100 + 1:
+    prof = profile(
+        schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=1),
+        record_shapes=False,
+        with_stack=False,
+        # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    )
+    prof.start()
     while iter_num < config["iter_nums"]:
+        prof.step()
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
 
@@ -146,10 +154,9 @@ if __name__ == "__main__":
                 out_dir = "out"
                 print(f"saving checkpoint to {out_dir}")
                 transformer.export(os.path.join(out_dir, "model.bin"))
-        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+
         loss = model.forward_backward_step(X, Y)
         # print(prof.key_averages().table(sort_by="cuda_time"))
-        # prof.export_chrome_trace("trace.json")
 
         X, Y = next(train_batch_iter)
 
@@ -178,6 +185,10 @@ if __name__ == "__main__":
             )
 
         iter_num += 1
+    prof.stop()
+    if dist.get_rank() == 1:
+        prof.export_chrome_trace("trace.json")
+
     if config["output"] and dist.get_rank() == 0:
         with open("result-wei", "a") as f:
             f.write(
