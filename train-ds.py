@@ -182,14 +182,18 @@ ds_config = {
         "params": {"lr": 5e-4, "betas": [beta1, beta2], "weight_decay": weight_decay},
     },
     "gradient_clipping": grad_clip,
-    "contiguous_gradients": True,
-    "overlap_comm": True,
     "bf16": {
         "enabled": True,
     },
     "gradient_accumulation_steps": gradient_accumulation_steps,
     "zero_optimization": {
         "stage": args.stage,
+        "contiguous_gradients": False,
+        "overlap_comm": True,
+        # "stage3_max_live_parameters": 1e5,
+        "stage3_max_reuse_distance": 0,
+        # "stage3_prefetch_bucket_size": 3e5,
+        # "stage3_param_persistence_threshold": 10,
     },
     # "activation_checkpointing": {
     #     "partition_activations": True,
