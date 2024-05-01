@@ -1,7 +1,5 @@
 from weipipe import WeiPipe
 from actpipe import ActPipe
-from dp import DP
-from fsdp import FSDP_allgather as FSDP
 import time
 import json
 from functools import partial
@@ -89,8 +87,6 @@ assert gradient_accumulation_steps % dist.get_world_size() == 0
 strategy = {
     "act": ActPipe,
     "wei": WeiPipe,
-    "dp": DP,
-    "fsdp": FSDP,
 }
 
 model = strategy[mode](
@@ -120,7 +116,6 @@ def estimate_loss(model, eval_iters=20):
             X, Y = next(batch_iter)
             model(X, Y)
             loss = model.last_loss
-
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -177,11 +172,10 @@ if __name__ == "__main__":
             #     f"{iter_num} | lr {lr:e} | time {dt*1000 :.2f}ms",
             # )
 
-        # if iter_num == 0:
-        print_rank(0, f"memory used: {torch.cuda.memory_allocated()/1024**3:.2f}G")
-        print_rank(
-            0, f"max memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G"
-        )
+        if iter_num < 3:
+            print_rank(
+                0, f"max memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G"
+            )
 
         iter_num += 1
     if config["output"] and dist.get_rank() == 0:
