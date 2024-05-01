@@ -33,7 +33,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tinystories import Task
 import json
 import argparse
+import logging
 
+deepspeed_logger = logging.getLogger("DeepSpeed")
+deepspeed_logger.setLevel(logging.ERROR)
+for hdl in deepspeed_logger.handlers:
+    hdl.setLevel(logging.ERROR)
 parser = argparse.ArgumentParser()
 parser.add_argument("--stage", default=3, type=int)
 parser.add_argument("--checkpoint", action="store_true")
@@ -211,14 +216,13 @@ ds_config = {
 
 # from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_cold
 # estimate_zero3_model_states_mem_needs_all_cold(model, num_gpus_per_node=2, num_nodes=1)
-ds.init_distributed()
+if ddp_rank == 0:
+    print("num parameters: ", sum(p.numel() for p in model.parameters()) / 1e9, "e9")
+
 model, _, _, _ = ds.initialize(
     model=model, model_parameters=model.parameters(), config=ds_config
 )
 model.train()
-
-
-checkpoint = None  # free up memory
 
 
 # learning rate decay scheduler (cosine with warmup)
