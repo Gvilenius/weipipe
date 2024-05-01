@@ -243,7 +243,15 @@ t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
+prof = torch.profiler.profile(
+    schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=1),
+    record_shapes=False,
+    with_stack=False,
+    # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+)
+prof.start()
 while iter_num < config["iter_nums"]:
+    prof.step()
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for i in range(gradient_accumulation_steps):
@@ -275,6 +283,10 @@ while iter_num < config["iter_nums"]:
         print(
             f"rank{ddp_local_rank} max memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
         )
+
+prof.stop()
+if ddp_rank == 0:
+    prof.export_chrome_trace("trace.json")
 
 if config["output"] and torch.distributed.get_rank() == 0:
     with open("result-ds", "a") as f:
