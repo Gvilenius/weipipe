@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+import deepspeed
 
 
 @dataclass
@@ -160,8 +161,13 @@ class Attention(nn.Module):
             scores = (
                 scores + self.mask[:, :, :seqlen, :seqlen]
             )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            scores = self.attn_dropout(scores)
+            scores = deepspeed.checkpointing.checkpoint(
+                F.softmax, scores.float(), dim=-1
+            ).type_as(xq)
+            scores = deepspeed.checkpointing.checkpoint(self.attn_dropout, scores)
+
+            # scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            # scores = self.attn_dropout(scores)
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
 
         # restore time as batch dimension and concat heads
@@ -204,6 +210,14 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
+        if deepspeed.checkpointing.is_configured():
+            return deepspeed.checkpointing.checkpoint(
+                self.forward_, x, freqs_cos, freqs_sin
+            )
+        else:
+            return self.forward_(x, freqs_cos, freqs_sin)
+
+    def forward_(self, x, freqs_cos, freqs_sin):
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
@@ -269,6 +283,7 @@ class Transformer(nn.Module):
 
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
+            # h = torch.utils.checkpoint.checkpoint(layer, h, freqs_cos, freqs_sin)
         h = self.norm(h)
 
         if targets is not None:

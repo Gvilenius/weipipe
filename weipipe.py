@@ -123,8 +123,8 @@ class WeiPipe:
         config.n_layers //= self.world_size
 
         self.model_32 = Model(config).cuda()
-        self.model_16 = Model(config).cuda().bfloat16()
 
+        self.model_16 = Model(config).cuda().bfloat16()
         # forward backup
         self.decoders = Layer(config).cuda().bfloat16()
 
@@ -169,6 +169,7 @@ class WeiPipe:
         flatten(self.model_16.decoders, self.buffers[f"weight{0}"].recv)
         flatten(self.decoders, self.buffers[f"weight{1}"].recv)
 
+    # ring exchange
     def flow_op(self, idx):
         prev_rank = (self.rank + self.world_size - 1) % self.world_size
         next_rank = (self.rank + 1) % self.world_size
@@ -340,7 +341,10 @@ class WeiPipe:
         wait(b_reqs)
         wait(g_reqs)
 
+        del embedding_x, embedding_grad
+
         self.activations.reverse()
+
         self.update()
         return loss
 
@@ -393,6 +397,7 @@ class WeiPipe:
 
     def update(self):
         # exchange params for embedding
+
         num_params_embedding = num_params(self.model_16.embedding)
         num_params_norm = num_params(self.model_16.norm)
         grad_buffer = init_tensor(num_params_embedding + num_params_norm)
@@ -414,7 +419,6 @@ class WeiPipe:
             self.model_32.decoders,
         )
         self.buffers["grad"].send.zero_()
-        self.model_16.decoders.zero_grad()
 
         nn.utils.clip_grad_norm_(params(self.model_32), 1.0)
         self.optimizer.step()

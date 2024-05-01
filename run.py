@@ -60,12 +60,22 @@ model_args = dict(
     n_layers=config["n_layers"],
 )
 
-model_size = 12 * config["n_layers"] * config["dim"] ** 2 * 16 / 1024**3
+model_size = (
+    12 * config["n_layers"] * config["dim"] ** 2 * 2 / dist.get_world_size() / 1024**3
+)
+optimizer_size = (2 + 2 + 2 + 1) * model_size
+
 data_size = config["batch_size"] * config["max_seq_len"] * 2 * 2 / 1024**3
-vocab_size = config["vocab_size"] * config["dim"] * 2 * 2 / 1024**3
-print_rank(0, f"model_size {model_size} G")
-print_rank(0, f"data_size {data_size} G")
-print_rank(0, f"vocab_size {vocab_size} G")
+
+# share
+vocab_size = config["vocab_size"] * config["dim"] * 2 / 1024**3
+vocab_optimier_size = (2 + 2 + 2 + 1) * vocab_size
+
+print_rank(0, f"model     {model_size:.4f} G")
+print_rank(0, f"optimizer {optimizer_size:.4f} G")
+print_rank(0, f"data_size {data_size: .4f}  G")
+print_rank(0, f"vocab     {vocab_size: .4f} G")
+print_rank(0, f"vocab opt {vocab_optimier_size: .4f} G")
 
 
 # microbatch size
@@ -167,10 +177,11 @@ if __name__ == "__main__":
             #     f"{iter_num} | lr {lr:e} | time {dt*1000 :.2f}ms",
             # )
 
-        if iter_num == 0:
-            print_rank(
-                0, f"memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G"
-            )
+        # if iter_num == 0:
+        print_rank(0, f"memory used: {torch.cuda.memory_allocated()/1024**3:.2f}G")
+        print_rank(
+            0, f"max memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G"
+        )
 
         iter_num += 1
     if config["output"] and dist.get_rank() == 0:

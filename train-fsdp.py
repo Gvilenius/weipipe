@@ -36,6 +36,7 @@ from torch.distributed.fsdp.wrap import (
     wrap,
 )
 import json
+from torch.distributed.fsdp.api import MixedPrecision
 
 with open("config.json", "r") as f:
     config = json.load(f)
@@ -138,7 +139,7 @@ ptdtype = {
 ctx = (
     nullcontext()
     if device_type == "cpu"
-    else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    else torch.amp.autocast(device_type=device_type, dtype=ptdtype, cache_enabled=False)
 )
 
 
@@ -181,7 +182,13 @@ model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
 
 if config["fsdp"]:
     my_policy = partial(size_based_auto_wrap_policy, min_num_params=20000)
-    model = FSDP(model, auto_wrap_policy=my_policy)
+    model = FSDP(
+        model,
+        mixed_precision=MixedPrecision(
+            param_dtype=torch.bfloat16, cast_forward_inputs=True
+        ),
+        auto_wrap_policy=my_policy,
+    )
     # optimizer
     optimizer = model.configure_optimizers(
         weight_decay, learning_rate, (beta1, beta2), device_type
@@ -225,11 +232,11 @@ while iter_num < config["iter_nums"]:
         param_group["lr"] = lr
 
     for micro_step in range(gradient_accumulation_steps):
-        model.require_backward_grad_sync = micro_step == gradient_accumulation_steps - 1
-        with ctx:
-            logits = model(X, Y)
-            loss = raw_model.last_loss
-            loss = loss / gradient_accumulation_steps
+        # model.require_backward_grad_sync = micro_step == gradient_accumulation_steps - 1
+        # with ctx:
+        logits = model(X, Y)
+        loss = raw_model.last_loss
+        loss = loss / gradient_accumulation_steps
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = next(train_batch_iter)
 
@@ -267,10 +274,8 @@ while iter_num < config["iter_nums"]:
     if iter_num > max_iters:
         break
 
-    if iter_num == 0:
-        print(
-            f"rank{ddp_local_rank} memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
-        )
+    if ddp_local_rank == 0:
+        print(f"max memory used: {torch.cuda.max_memory_allocated()/1024**3}G")
 
 if config["output"] and torch.distributed.get_rank() == 0:
     with open("result-fsdp", "a") as f:

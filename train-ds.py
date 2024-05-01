@@ -32,6 +32,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from tinystories import Task
 import json
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--stage", default=3, type=int)
+args = parser.parse_args()
 
 with open("config.json", "r") as f:
     config = json.load(f)
@@ -167,27 +172,40 @@ model.to(device)
 prefix = "_orig_mod." if compile else ""
 model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
 
+
+ds.checkpointing.configure(None)
 ds_config = {
     "train_micro_batch_size_per_gpu": batch_size,
     # "amp": {"enabled": True, "opt_level": "O2"},
     "optimizer": {
-        "type": "Adam",
+        "type": "AdamW",
         "params": {"lr": 5e-4, "betas": [beta1, beta2], "weight_decay": weight_decay},
     },
     "gradient_clipping": grad_clip,
+    "contiguous_gradients": True,
+    "overlap_comm": True,
     "bf16": {
         "enabled": True,
     },
     "gradient_accumulation_steps": gradient_accumulation_steps,
     "zero_optimization": {
-        "stage": 3,
+        "stage": args.stage,
     },
+    # "activation_checkpointing": {
+    #     "partition_activations": True,
+    #     "profile": True,
+    #     "cpu_checkpointing": True,
+    # },
 }
+
 # optimizer
 # optimizer = model.configure_optimizers(
 #     weight_decay, learning_rate, (beta1, beta2), device_type
 # )
 
+# from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_cold
+# estimate_zero3_model_states_mem_needs_all_cold(model, num_gpus_per_node=2, num_nodes=1)
+ds.init_distributed()
 model, _, _, _ = ds.initialize(
     model=model, model_parameters=model.parameters(), config=ds_config
 )
@@ -244,9 +262,12 @@ while iter_num < config["iter_nums"]:
     if iter_num > max_iters:
         break
 
-    if iter_num == 0:
+    if ddp_local_rank == 0:
         print(
-            f"rank{ddp_local_rank} memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
+            f"rank{ddp_local_rank} memory used: {torch.cuda.memory_allocated()/1024**3}G"
+        )
+        print(
+            f"rank{ddp_local_rank} max memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
         )
 
 if config["output"] and torch.distributed.get_rank() == 0:
