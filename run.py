@@ -56,6 +56,7 @@ model_args = dict(
     max_seq_len=config["max_seq_len"],
     dropout=config["dropout"],
     n_layers=config["n_layers"],
+    checkpointing=config["checkpointing"]
 )
 
 model_size = (
@@ -140,9 +141,8 @@ if __name__ == "__main__":
         with_stack=False,
         # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
     )
-    prof.start()
-    while iter_num < config["iter_nums"]:
-        prof.step()
+    dts = []
+    while iter_num < config["iters_num"]:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
 
@@ -168,6 +168,7 @@ if __name__ == "__main__":
             n_total_samples += batch_size
 
         dt = time.time() - start
+        dts.append(dt * 1000)
 
         start = time.time()
         if iter_num % 1 == 0 and dist.get_rank() == loss_rank:
@@ -180,17 +181,23 @@ if __name__ == "__main__":
             # )
 
         if iter_num < 3:
-            print_rank(
-                0, f"max memory used: {torch.cuda.max_memory_allocated()/1024**3:.2f}G"
-            )
+            memory = torch.cuda.max_memory_allocated() / 1024**3
+            print_rank(0, f"max memory used: {memory:.2f}G")
 
         iter_num += 1
-    prof.stop()
-    if dist.get_rank() == 1:
-        prof.export_chrome_trace("trace.json")
+    # if dist.get_rank() == 0:
+    #    prof.export_chrome_trace("trace.json")
 
     if config["output"] and dist.get_rank() == 0:
-        with open("result-wei", "a") as f:
-            f.write(
-                f'{config["batch_size"]}-{config["gradient_accumulation_steps"]}: {dt:.2f}\n'
-            )
+        import csv
+        import numpy as np
+
+        with open("result-wei.csv", "a") as f:
+            writer = csv.writer(f)
+            l = config["n_layers"]
+            h = config["dim"]
+            s = config["max_seq_len"]
+            m = gradient_accumulation_steps
+            t = f"{np.mean(dts[1:]):.2f}"
+            memory = f"{memory:.2f}"
+            writer.writerow([l, h, s, m, t, memory])

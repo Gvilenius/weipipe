@@ -73,7 +73,7 @@ gradient_accumulation_steps = config[
     "gradient_accumulation_steps"
 ]  # used to simulate larger batch sizes
 learning_rate = config["lr"]  # max learning rate
-max_iters = config["iter_nums"]  # total number of training iterations
+max_iters = config["iters_num"]  # total number of training iterations
 
 weight_decay = 1e-1
 beta1 = 0.9
@@ -183,7 +183,6 @@ if args.checkpoint:
     ds.checkpointing.configure(None)
 ds_config = {
     "train_micro_batch_size_per_gpu": batch_size,
-    # "amp": {"enabled": True, "opt_level": "O2"},
     "optimizer": {
         "type": "AdamW",
         "params": {"lr": 5e-4, "betas": [beta1, beta2], "weight_decay": weight_decay},
@@ -202,11 +201,6 @@ ds_config = {
         # "stage3_prefetch_bucket_size": 3e5,
         # "stage3_param_persistence_threshold": 10,
     },
-    # "activation_checkpointing": {
-    #     "partition_activations": True,
-    #     "profile": True,
-    #     "cpu_checkpointing": True,
-    # },
 }
 
 # optimizer
@@ -249,13 +243,12 @@ raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
 prof = torch.profiler.profile(
     schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=1),
-    record_shapes=False,
+    record_shapes=True,
     with_stack=False,
     # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
 )
-prof.start()
-while iter_num < config["iter_nums"]:
-    prof.step()
+dts = []
+while iter_num < config["iters_num"]:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for i in range(gradient_accumulation_steps):
@@ -269,6 +262,7 @@ while iter_num < config["iter_nums"]:
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
+    dts.append(dt * 1000)
     if iter_num % log_interval == 0 and master_process:
         # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
         lossf = loss.item()
@@ -276,24 +270,24 @@ while iter_num < config["iter_nums"]:
     iter_num += 1
     local_iter_num += 1
 
-    # termination conditions
-    if iter_num > max_iters:
-        break
-
     if ddp_local_rank == 0:
-        print(
-            f"rank{ddp_local_rank} memory used: {torch.cuda.memory_allocated()/1024**3}G"
-        )
-        print(
-            f"rank{ddp_local_rank} max memory used: {torch.cuda.max_memory_allocated()/1024**3}G"
-        )
+        memory = torch.cuda.max_memory_allocated() / 1024**3
+        print(f"rank{ddp_local_rank} max memory used: {memory:.2f}G")
 
-prof.stop()
-if ddp_rank == 0:
-    prof.export_chrome_trace("trace.json")
+
+# if ddp_rank == 0:
+# prof.export_chrome_trace("trace.json")
 
 if config["output"] and torch.distributed.get_rank() == 0:
-    with open("result-ds", "a") as f:
-        f.write(
-            f'{config["batch_size"]}-{config["gradient_accumulation_steps"]}: {dt:.2f}\n'
-        )
+    import csv
+    import numpy as np
+
+    with open("result-ds.csv", "a") as f:
+        writer = csv.writer(f)
+        l = config["n_layers"]
+        h = config["dim"]
+        s = config["max_seq_len"]
+        m = gradient_accumulation_steps
+        t = f"{np.mean(dts[1:]):.2f}"
+        memory = f"{memory:.2f}"
+        writer.writerow([l, h, s, m, t, memory])

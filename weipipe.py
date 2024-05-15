@@ -6,7 +6,7 @@ import copy
 from pprint import pprint
 from model import Layer, ModelArgs, Transformer, RMSNorm
 from torch.profiler import profile, record_function, ProfilerActivity
-
+from contextlib import nullcontext
 from utils import (
     loss_fn,
     configure_optimizers,
@@ -26,7 +26,11 @@ class ActivationBuffer:
     def reverse(self):
         self._reverse = not self._reverse
 
-    def push(self, x):
+    def push(self, x, detach=False):
+        if detach:
+            x = x.detach()
+            x.requires_grad = True
+            
         if not self._reverse:
             self.activations.append(x)
         else:
@@ -99,6 +103,12 @@ def copy_weights(model_src, model_dest):
     for param_src, param_dest in zip(model_src.parameters(), model_dest.parameters()):
         param_dest.data.copy_(param_src.data)
 
+def flatten(model, tensor):
+    i = 0
+    for p in params(model):
+        n = p.data.numel()
+        p.data = tensor[i : i + n].view(p.data.shape)
+        i += n
 
 class Model(nn.Module):
     def __init__(self, config):
@@ -115,6 +125,7 @@ class WeiPipe:
     def __init__(self, config, batch_size, gradient_accumulation_steps=1):
         # Setup world info
 
+        self.enable_checkpointing = config.checkpointing
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
 
@@ -159,12 +170,7 @@ class WeiPipe:
             self.buffers["weight0"].recv[i : i + n] = p.data.view(-1)
             i += n
 
-        def flatten(model, tensor):
-            i = 0
-            for p in params(model):
-                n = p.data.numel()
-                p.data = tensor[i : i + n].view(p.data.shape)
-                i += n
+
 
         flatten(self.model_16.decoders, self.buffers[f"weight{0}"].recv)
         flatten(self.decoders, self.buffers[f"weight{1}"].recv)
@@ -200,7 +206,12 @@ class WeiPipe:
 
     def grad_flow(self):
         grad_buffer = self.buffers["grad"]
-        grad_to_tensor(self.model_16.decoders, grad_buffer.send)
+        
+        if self.enable_checkpointing:
+            grad_to_tensor(self.decoders, grad_buffer.send)
+        else:
+            grad_to_tensor(self.model_16.decoders, grad_buffer.send)
+            
         reqs = dist.batch_isend_irecv(self.flow_op("grad"))
         self.buffers["grad"].pingpong()
         return reqs
@@ -208,19 +219,31 @@ class WeiPipe:
     def forward(self, x):
         return self.get_full_transformer(x)
 
-    def forward_step(self, i_layer):
+    def forward_step(self):
         x = self.activations.top()
-        with torch.no_grad():
+        x.retain_grad()
+        
+        ctx = nullcontext() if self.enable_checkpointing else torch.no_grad()
+        
+        with ctx:
             x = self.decoders(x)
-        self.activations.push(x)
 
-    def backward_step(self, grad=None, i_layer=-1):
-        inputs = self.activations.pop().detach()
-        inputs.requires_grad = True
+        self.activations.push(x)
+        self.activations.push(x, detach=True)
+
+    def backward_step(self, grad=None):
+        outputs = self.activations.pop()
+        inputs = self.activations.pop()
 
         # recomputation
-        outputs = self.model_16.decoders(inputs)
-        outputs.backward(grad)
+        if not self.enable_checkpointing:
+            outputs = self.model_16.decoders(inputs)
+            outputs.backward(grad)
+        else:
+            # replace weight and then do checkpointing
+            flatten(self.decoders, self.buffers[f"weight{0}"].recv)
+            outputs.backward(grad)
+            flatten(self.decoders, self.buffers[f"weight{1}"].recv)
 
         return inputs.grad
 
@@ -237,13 +260,12 @@ class WeiPipe:
     def calc_grad(self, targets=None):
         outputs = self.activations.pop()
 
-        outputs.requires_grad = True
         loss = self.loss_fn(self.postprocess(outputs), targets)
         loss.backward()
         grad = outputs.grad
         return grad, loss
 
-    # mark
+        
     def forward_backward_step(self, inputs, targets=None):
         ### fuck async
         gradient_accumulation_steps = self.gradient_accumulation_steps
@@ -258,7 +280,9 @@ class WeiPipe:
         embedding_x = []
         embedding_grad = []
         x = self.preprocess(inputs[0])
-        self.activations.push(x)
+        
+        self.activations.push(x, detach=True)
+        
         embedding_x.append(x)
 
         f_reqs = None
@@ -271,7 +295,7 @@ class WeiPipe:
 
         for i in range(self.world_size - self.rank):
             wait(f_reqs)
-            self.forward_step(i_layer=i)
+            self.forward_step()
             f_reqs = self.forward_weight_flow()
 
         for i in range(self.rank):
@@ -282,30 +306,30 @@ class WeiPipe:
             g_reqs = self.grad_flow()
 
             wait(f_reqs)
-            self.forward_step(i_layer=self.world_size + i - self.rank)
+            self.forward_step()
             f_reqs = self.forward_weight_flow()
 
         for i in range(gradient_accumulation_steps - 1):
             self.activations.reverse()
 
             x = self.preprocess(inputs[i + 1])
-            self.activations.push(x)
+            
+            
+            self.activations.push(x, detach=True)
+            
             embedding_x.append(x)
 
             grad, loss = self.calc_grad(targets[i])
             for j in range(self.world_size):
                 wait(b_reqs)
-                grad = self.backward_step(
-                    grad=grad,
-                    i_layer=self.world_size - 1 - j,
-                )
+                grad = self.backward_step(grad=grad)
                 b_reqs = self.backward_weight_flow()
 
                 wait(g_reqs)
                 g_reqs = self.grad_flow()
 
                 wait(f_reqs)
-                self.forward_step(i_layer=j)
+                self.forward_step()
                 f_reqs = self.forward_weight_flow()
             embedding_grad.append(grad)
 
@@ -313,7 +337,7 @@ class WeiPipe:
         grad, loss = self.calc_grad(targets[-1])
         for i in range(self.world_size - 1 - self.rank):
             wait(b_reqs)
-            grad = self.backward_step(grad=grad, i_layer=self.world_size - 1 - i)
+            grad = self.backward_step(grad=grad)
             b_reqs = self.backward_weight_flow()
 
             wait(g_reqs)
@@ -325,7 +349,7 @@ class WeiPipe:
         for i in range(self.world_size + 1):
             wait(b_reqs)
             if i <= self.rank:
-                grad = self.backward_step(grad=grad, i_layer=self.rank - i)
+                grad = self.backward_step(grad=grad)
                 if i == self.rank:
                     embedding_grad.append(grad)
 
@@ -336,12 +360,13 @@ class WeiPipe:
 
         for i in range(gradient_accumulation_steps):
             embedding_x[i].backward(embedding_grad[i])
+            
+        del embedding_x, embedding_grad
 
         wait(f_reqs)
         wait(b_reqs)
         wait(g_reqs)
 
-        del embedding_x, embedding_grad
 
         self.activations.reverse()
 
@@ -404,21 +429,19 @@ class WeiPipe:
 
         grad_to_tensor(self.model_16.embedding, grad_buffer[0:num_params_embedding])
         grad_to_tensor(self.model_16.norm, grad_buffer[num_params_embedding:])
-
-        dist.all_reduce(grad_buffer)
-        grad_buffer /= self.world_size * self.gradient_accumulation_steps
-
-        tensor_to_grad(grad_buffer[0:num_params_embedding], self.model_32.output)
-        tensor_to_grad(grad_buffer[num_params_embedding:], self.model_32.norm)
-        del grad_buffer
+        all_reduce_handler = dist.all_reduce(grad_buffer, async_op=False)
 
         self.buffers["grad"].send /= self.world_size * self.gradient_accumulation_steps
-
         tensor_to_grad(
             self.buffers["grad"].send,
             self.model_32.decoders,
         )
         self.buffers["grad"].send.zero_()
+
+        # all_reduce_handler.wait()
+        grad_buffer /= self.world_size * self.gradient_accumulation_steps
+        tensor_to_grad(grad_buffer[0:num_params_embedding], self.model_32.output)
+        tensor_to_grad(grad_buffer[num_params_embedding:], self.model_32.norm)
 
         nn.utils.clip_grad_norm_(params(self.model_32), 1.0)
         self.optimizer.step()

@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 import deepspeed
-
+from torch.utils.checkpoint import checkpoint as ckpt
 
 @dataclass
 class ModelArgs:
@@ -22,6 +22,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     max_seq_len: int = 2048
     dropout: float = 0.0
+    checkpointing: bool = False
 
 
 class RMSNorm(torch.nn.Module):
@@ -470,6 +471,7 @@ class Layer(nn.Module):
             if pn.endswith("w3.weight") or pn.endswith("wo.weight"):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2))
 
+        self.enable_checkpointing = config.checkpointing
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -485,7 +487,11 @@ class Layer(nn.Module):
         freqs_sin = self.freqs_sin[:seq_len]
         h = tokens
 
-        for layer in self.layers:
-            h = layer(h, freqs_cos, freqs_sin)
-
+        if self.enable_checkpointing:
+            for layer in self.layers:
+                h = ckpt (layer, h, freqs_cos, freqs_sin)
+        else:
+            for layer in self.layers:
+                h = layer(h, freqs_cos, freqs_sin)
+                
         return h
