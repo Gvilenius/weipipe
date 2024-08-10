@@ -16,7 +16,7 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
-from tokenizer import Tokenizer
+from tokenizer.tokenizer import Tokenizer
 
 DATA_CACHE_DIR = "data"
 

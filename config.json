@@ -1,16 +1,17 @@
 {
-    "batch_size": 64,
-    "gradient_accumulation_steps": 8,
+    "batch_size": 8,
+    "gradient_accumulation_steps": 2,
     "mode": "wei",
     "dim": 1024,
-    "n_layers": 6,
-    "max_seq_len": 512,
-    "n_heads": 8,
+    "n_layers": 1,
+    "max_seq_len": 1024,
+    "n_heads": 32,
     "vocab_size": 32000,
     "multiple_of": 32,
     "dropout": 0.0,
-    "fsdp": false,
     "lr": 0.0005,
-    "iter_nums": 100,
-    "output" : false
+    "iters_num": 2,
+    "output": true,
+    "train_embedding": false,
+    "checkpointing": true
 }

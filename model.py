@@ -453,10 +453,10 @@ class Layer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList()
+        self.decoders = nn.ModuleList()
 
         for i in range(config.n_layers):
-            self.layers.append(TransformerBlock(config))
+            self.decoders.append(TransformerBlock(config))
 
         freqs_cos, freqs_sin = precompute_freqs_cis(
             config.dim // config.n_heads, config.max_seq_len
@@ -488,10 +488,10 @@ class Layer(nn.Module):
         h = tokens
 
         if self.enable_checkpointing:
-            for layer in self.layers:
-                h = ckpt (layer, h, freqs_cos, freqs_sin)
+            for layer in self.decoders:
+                h = ckpt (layer, h, freqs_cos, freqs_sin, use_reentrant=True)
         else:
-            for layer in self.layers:
+            for layer in self.decoders:
                 h = layer(h, freqs_cos, freqs_sin)
                 
         return h

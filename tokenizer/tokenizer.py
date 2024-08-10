@@ -9,8 +9,8 @@ from typing import List
 
 from sentencepiece import SentencePieceProcessor
 
-TOKENIZER_MODEL = "tokenizer.model" # the llama sentencepiece tokenizer model
-TOKENIZER_BIN = "tokenizer.bin" # binary version of the tokenizer for inference in C
+TOKENIZER_MODEL = "tokenizer/tokenizer.model" # the llama sentencepiece tokenizer model
+TOKENIZER_BIN = "tokenizer/tokenizer.bin" # binary version of the tokenizer for inference in C
 
 class Tokenizer:
     def __init__(self):

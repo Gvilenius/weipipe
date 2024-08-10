@@ -1,21 +1,4 @@
-"""
-This training script can be run both on a single gpu in debug mode,
-and also in a larger training run with distributed data parallel (ddp).
-
-To run on a single GPU small debug run, example:
-$ python -m train.py --compile=False --eval_iters=10 --batch_size=8
-
-To run with DDP on 4 gpus on 1 node, example:
-$ torchrun --standalone --nproc_per_node=4 train.py
-
-To run with DDP on 4 gpus across 2 nodes, example:
-- Run on the first (master) node with example IP 123.456.123.456:
-$ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py
-- Run on the worker node:
-$ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
-(If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
-"""
-
+import torch.distributed
 import torch.nn.functional as F
 import math
 import deepspeed as ds
@@ -41,7 +24,6 @@ for hdl in deepspeed_logger.handlers:
     hdl.setLevel(logging.ERROR)
 parser = argparse.ArgumentParser()
 parser.add_argument("--stage", default=3, type=int)
-parser.add_argument("--checkpoint", action="store_true")
 args = parser.parse_args()
 
 with open("config.json", "r") as f:
@@ -115,8 +97,6 @@ seed_offset = ddp_rank  # each process gets a different seed
 # world_size number of processes will be training simultaneously, so we can scale
 # down the desired gradient accumulation iterations per process proportionally
 
-gradient_accumulation_steps //= ddp_world_size
-batch_size //= gradient_accumulation_steps
 
 tokens_per_iter = (
     gradient_accumulation_steps * ddp_world_size * batch_size * max_seq_len
@@ -135,12 +115,6 @@ torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
 device_type = "cuda" if "cuda" in device else "cpu"  # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
-ptdtype = {
-    "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-    "float16": torch.float16,
-}[dtype]
-
 
 # task-specific setup
 task = Task
@@ -159,7 +133,7 @@ best_val_loss = 1e9
 # model init
 model_args = dict(
     dim=dim,
-    n_layers=n_layers,
+    n_layers=n_layers*int(os.environ["WORLD_SIZE"]),
     n_heads=n_heads,
     n_kv_heads=n_heads,
     vocab_size=config["vocab_size"],
@@ -169,6 +143,8 @@ model_args = dict(
 )  # start with model_args from command line
 gptconf = ModelArgs(**model_args)
 model = Transformer(gptconf)
+if not config["train_embedding"]:
+    model.tok_embeddings.weight.requires_grad = False
 
 model.to(device)
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -179,7 +155,9 @@ prefix = "_orig_mod." if compile else ""
 model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
 
 
-if args.checkpoint:
+nparam_per_chunk = 12 * config["dim"] ** 2 * config["n_layers"] + config["vocab_size"] * config["dim"] / ddp_world_size
+
+if config["checkpointing"]:
     ds.checkpointing.configure(None)
 ds_config = {
     "train_micro_batch_size_per_gpu": batch_size,
@@ -188,7 +166,10 @@ ds_config = {
         "params": {"lr": 5e-4, "betas": [beta1, beta2], "weight_decay": weight_decay},
     },
     "gradient_clipping": grad_clip,
-    "bf16": {
+    # "bf16": {
+    #     "enabled": True,
+    # },
+    "fp16": {
         "enabled": True,
     },
     "gradient_accumulation_steps": gradient_accumulation_steps,
@@ -196,9 +177,9 @@ ds_config = {
         "stage": args.stage,
         "contiguous_gradients": False,
         "overlap_comm": True,
-        # "stage3_max_live_parameters": 1e5,
-        "stage3_max_reuse_distance": 0,
-        # "stage3_prefetch_bucket_size": 3e5,
+        # "stage3_max_live_parameters": 1e9,
+        # "stage3_max_reuse_distance": 0,
+        # "stage3_prefetch_bucket_size": 1e9,
         # "stage3_param_persistence_threshold": 10,
     },
 }
@@ -210,6 +191,7 @@ ds_config = {
 
 # from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_cold
 # estimate_zero3_model_states_mem_needs_all_cold(model, num_gpus_per_node=2, num_nodes=1)
+
 if ddp_rank == 0:
     print("num parameters: ", sum(p.numel() for p in model.parameters()) / 1e9, "e9")
 
@@ -251,12 +233,13 @@ dts = []
 while iter_num < config["iters_num"]:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
+    
     for i in range(gradient_accumulation_steps):
         loss = model(X, Y)
         model.backward(loss)
         model.step()
-    # immediately async prefetch next batch while model is doing the forward pass on the GPU
-    X, Y = next(train_batch_iter)
+        # immediately async prefetch next batch while model is doing the forward pass on the GPU
+        X, Y = next(train_batch_iter)
 
     # timing and logging
     t1 = time.time()
@@ -278,16 +261,9 @@ while iter_num < config["iters_num"]:
 # if ddp_rank == 0:
 # prof.export_chrome_trace("trace.json")
 
-if config["output"] and torch.distributed.get_rank() == 0:
-    import csv
-    import numpy as np
+from utils import output_statistics
+import numpy as np
 
-    with open("result-ds.csv", "a") as f:
-        writer = csv.writer(f)
-        l = config["n_layers"]
-        h = config["dim"]
-        s = config["max_seq_len"]
-        m = gradient_accumulation_steps
-        t = f"{np.mean(dts[1:]):.2f}"
-        memory = f"{memory:.2f}"
-        writer.writerow([l, h, s, m, t, memory])
+t = f"{np.mean(dts[1:]):.2f}"
+if torch.distributed.get_rank() == 0:
+    output_statistics ("ds", t, memory)

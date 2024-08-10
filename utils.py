@@ -5,8 +5,33 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 import os
+import json
+import csv
 from model import Transformer, ModelArgs
 
+
+def output_statistics(fname, t, memory):
+    world_size = dist.get_world_size()
+    with open ("/workspace/weipipe/config.json") as f:
+        config = json.load(f)
+    fname = "/workspace/weipipe/result/{}.csv".format(fname)
+    if config["output"]:
+        init = not os.path.exists (fname)
+        with open(fname, "a") as f:
+            writer = csv.writer(f)
+            
+            l = int(config["n_layers"])
+            h = config["dim"]
+            s = config["max_seq_len"]
+            nm = config["gradient_accumulation_steps"]
+            m = config["batch_size"]
+            v = config["vocab_size"]
+            memory = f"{memory:.2f}"
+
+            nparam = (12 * l * world_size * h**2 + v*h) / 1024**2
+            if init:
+                writer.writerow (["nparam/M", "ngpu", "nlayer", "hidden", "seq_len", "n_micro", "mb", "time", "memory"])
+            writer.writerow([nparam, world_size, l, h, s, nm, m, t, memory])
 
 def get_lr(learning_rate, it, warmup_iters=0, lr_decay_iters=100000, min_lr=0.0):
     # 1) linear warmup for warmup_iters steps
@@ -86,7 +111,7 @@ def tensor_to_grad(tensor, model):
         i += n
 
 
-def init_tensor(n, dtype=torch.bfloat16, init_func=torch.empty):
+def init_tensor(n, dtype=torch.float16, init_func=torch.empty):
     return init_func(n).cuda().to(dtype)
 
 

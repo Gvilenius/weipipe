@@ -6,3 +6,4 @@ tiktoken==0.3.3
 tqdm==4.64.1
 wandb==0.15.5
 torch
+deepspeed

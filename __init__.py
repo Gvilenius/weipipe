@@ -1,3 +1,4 @@
 """A WeiPipe implementation in PyTorch."""
-from .weipipe import WeiPipe
-__all__ = ["WeiPipe"]
+from .utils import output_statistics
+
+__all__ = ["output_statistics"]
