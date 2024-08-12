@@ -164,10 +164,11 @@ if __name__ == "__main__":
         dts.append(dt * 1000)
 
         start = time.time()
+        loss = loss.item()
         if iter_num % 1 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
             print(
-                f"{iter_num} | loss {loss.item():.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
+                f"{iter_num} | loss {loss:.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
             )
             # print(
             #     f"{iter_num} | lr {lr:e} | time {dt*1000 :.2f}ms",
