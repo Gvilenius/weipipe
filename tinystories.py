@@ -19,6 +19,7 @@ from tqdm import tqdm
 from tokenizer.tokenizer import Tokenizer
 
 DATA_CACHE_DIR = "data"
+DATA_CACHE_DIR = "/tmp"
 
 def download_file(url: str, fname: str, chunk_size=1024):
     """Helper function to download a file from a given url"""
@@ -50,7 +51,7 @@ def download():
         print(f"{data_filename} already exists, skipping download...")
 
     # unpack the tar.gz file into all the data shards (json files)
-    data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
+    # data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
     if not os.path.exists(data_dir):
         os.makedirs(data_dir, exist_ok=True)
         print(f"Unpacking {data_filename}...")
@@ -116,10 +117,11 @@ class PretokDataset(torch.utils.data.IterableDataset):
         seed = 42 + worker_id + 1337 * rank
         rng = random.Random(seed)
         print(f"Created a PretokDataset with rng seed {seed}")
-        data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
+        # data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
+        data_dir = os.path.join(DATA_CACHE_DIR, "zb_sample_dataset/dataset")
         shard_filenames = sorted(glob.glob(os.path.join(data_dir, "*.bin")))
         # train/test split. let's use only shard 0 for test split, rest train
-        shard_filenames = shard_filenames[1:] if self.split == "train" else shard_filenames[:1]
+        #shard_filenames = shard_filenames[1:] if self.split == "train" else shard_filenames[:1]
         while True:
             rng.shuffle(shard_filenames)
             for shard in shard_filenames:

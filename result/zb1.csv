@@ -1,3 +1,0 @@
-nparam/M,ngpu,nlayer,hidden,seq_len,n_micro,mb,time,memory
-223.25,8,2,1024,1024,4,2,4014.68,2.29
-127.25,8,1,1024,1024,4,2,2726.61,1.58

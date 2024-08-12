@@ -9,12 +9,13 @@ def print_histogram(data):
         bar = '*' * int( v / max_v * 50)  # 假设最大宽度为20
         print(f"{k}: {bar}")
         
-os.system("python run.py --ngpu=8 --algo=1f1b")
-os.system("python run.py --ngpu=8 --algo=1f1bi")
-os.system("python run.py --ngpu=8 --algo=zb1")
-os.system("python run.py --ngpu=8 --algo=zb2")
-os.system("python run.py --ngpu=8 --algo=ds")
-os.system("python run.py --ngpu=8 --algo=wei")
+ngpu = 2
+os.system(f"python run.py --ngpu={ngpu} --algo=1f1b")
+os.system(f"python run.py --ngpu={ngpu} --algo=zb1")
+os.system(f"python run.py --ngpu={ngpu} --algo=zb2")
+os.system(f"python run.py --ngpu={ngpu} --algo=ds")
+os.system(f"python run.py --ngpu={ngpu} --algo=wei")
+#os.system("python run.py --ngpu=8 --algo=1f1bi")
 
 
 
