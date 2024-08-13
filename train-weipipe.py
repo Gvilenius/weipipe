@@ -46,61 +46,49 @@ init_process_group()
 
 world_size = dist.get_world_size()
 
-with open("config.json", "r") as f:
-    config = json.load(f)
+def get_env(k):
+    return int(os.environ[k])
+
+dim = get_env("HIDDEN_SIZE")
+n_heads = get_env("ATTENTION_HEADS")
+max_seq_len = get_env("SEQ_LEN")
+
+n_layers = get_env("LAYERS") 
+
+checkpointing = bool(get_env("CHECKPOINTING"))
+train_embedding = bool(get_env("TRAIN_EMBEDDING"))
+micro_batch_size = get_env("MICRO_BATCH_SIZE")
+gradient_accumulation_steps = get_env("ACC_STEP")
+iters_num = get_env("EXIT_INTERVAL")
 
 model_args = dict(
-    dim=config["dim"],
-    n_heads=config["n_heads"],
+    dim=dim,
+    n_heads=n_heads,
     n_kv_heads=None,
-    vocab_size=config["vocab_size"],
-    multiple_of=config["multiple_of"],
-    max_seq_len=config["max_seq_len"],
-    dropout=config["dropout"],
-    n_layers=config["n_layers"]*world_size,
-    checkpointing=config["checkpointing"]
+    vocab_size=32000,
+    multiple_of=32,
+    max_seq_len=max_seq_len,
+    dropout=0.0,
+    n_layers = n_layers,
+    checkpointing=checkpointing,
 )
 
-model_size = (
-    12 *  world_size *config["n_layers"] * config["dim"] ** 2 * 2 / dist.get_world_size() / 1024**3
-)
-optimizer_size = (2 + 2 + 2 + 1) * model_size
-
-data_size = config["batch_size"] * config["gradient_accumulation_steps"]* config["max_seq_len"] * 2 * 2 / 1024**3
-
-# share
-vocab_size = config["vocab_size"] * config["dim"] * 2 / 1024**3
-vocab_optimier_size = (2 + 2 + 2 + 1) * vocab_size
-
-print_rank(0, f"model     {model_size:.4f} G")
-print_rank(0, f"optimizer {optimizer_size:.4f} G")
-print_rank(0, f"data_size {data_size: .4f}  G")
-print_rank(0, f"vocab     {vocab_size: .4f} G")
-print_rank(0, f"vocab opt {vocab_optimier_size: .4f} G")
-
+print_rank(0, model_args)
 
 # microbatch size
-learning_rate = config["lr"]
-mode = config["mode"]
+learning_rate = 1e-5
 
-gradient_accumulation_steps = config["gradient_accumulation_steps"]
-
-strategy = {
-    "act": ActPipe,
-    "wei": WeiPipe,
-}
-
-model = strategy[mode](
+model = WeiPipe(
     ModelArgs(**model_args),
     gradient_accumulation_steps=gradient_accumulation_steps,
-    train_embedding=config["train_embedding"]
+    train_embedding=train_embedding,
 )
 
 eval_interval = 500
 iter_batches = partial(
     Task.iter_batches,
-    batch_size=config["batch_size"],
-    max_seq_len=model_args["max_seq_len"],
+    batch_size=micro_batch_size,
+    max_seq_len=max_seq_len,
     device="cuda",
     num_workers=0,
 )
@@ -128,7 +116,7 @@ if __name__ == "__main__":
     torch.manual_seed(1234)
 
     train_batch_iter = iter_batches("train")
-    #X, Y = next(train_batch_iter)
+    # X, Y = next(train_batch_iter)
 
     iter_num = 0
     start = time.time()
@@ -142,7 +130,7 @@ if __name__ == "__main__":
         # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
     )
     dts = []
-    while iter_num < config["iters_num"]:
+    while iter_num < iters_num:
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
 
@@ -182,7 +170,6 @@ if __name__ == "__main__":
     # if dist.get_rank() == 0:
     #    prof.export_chrome_trace("trace.json")
 
-
     t = f"{np.mean(dts[1:]):.2f}"
     if dist.get_rank() == 0:
-        output_statistics ("weipipe", t, memory)
+        output_statistics("weipipe", t, memory)

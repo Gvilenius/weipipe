@@ -6,6 +6,7 @@ from typing import Any, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.distributed
 import torch.nn.functional as F
 from torch import nn
 import deepspeed
@@ -35,14 +36,14 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
+        output = self._norm(x.half()).type_as(x)
         return output * self.weight
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].half() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
+    freqs = torch.outer(t, freqs).half()  # type: ignore
     freqs_cos = torch.cos(freqs)  # real part
     freqs_sin = torch.sin(freqs)  # imaginary part
     return freqs_cos, freqs_sin
@@ -60,8 +61,8 @@ def apply_rotary_emb(
     xq: torch.Tensor, xk: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # reshape xq and xk to match the complex representation
-    xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
-    xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
+    xq_r, xq_i = xq.half().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
+    xk_r, xk_i = xk.half().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
 
     # reshape freqs_cos and freqs_sin for broadcasting
     freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
@@ -111,6 +112,7 @@ class Attention(nn.Module):
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        
         if not self.flash:
             print(
                 "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
@@ -162,10 +164,6 @@ class Attention(nn.Module):
             scores = (
                 scores + self.mask[:, :, :seqlen, :seqlen]
             )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            # scores = deepspeed.checkpointing.checkpoint(
-            #     F.softmax, scores.float(), dim=-1
-            # ).type_as(xq)
-            # scores = deepspeed.checkpointing.checkpoint(self.attn_dropout, scores)
 
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
             scores = self.attn_dropout(scores)
