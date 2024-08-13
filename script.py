@@ -157,7 +157,7 @@ def show_all():
 
 if __name__ == "__main__":
     if args.mode == "single":
-        run_single(args.algo)
+        run_single(args.algo, ngpu_per_node=ngpu_per_node)
     elif args.mode == "all":
         run_all()
     elif args.mode == "scale":
