@@ -78,13 +78,12 @@ def run_single(algo, ngpu_per_node):
     
 def run_scale():
 
-
-    set_env("LAYERS", 8)
-    for ngpu_per_node in [2, 4, 8]:
+    set_env("LAYERS", 4)
+    for ngpu_per_node in [2, 4]:
         set_env ("PIPELINE_SIZE", ngpu_per_node)
         set_env ("GPUS_PER_NODE", ngpu_per_node)
         set_env("MICRO_BATCH_SIZE", ngpu_per_node)
-        run_single("wei", ngpu_per_node=ngpu_per_node)
+        run_all(ngpu_per_node=ngpu_per_node)
 
 
 def run_all(ngpu_per_node):
