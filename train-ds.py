@@ -175,7 +175,6 @@ model, _, _, _ = ds.initialize(
 )
 model.train()
 
-
 # learning rate decay scheduler (cosine with warmup)
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -212,6 +211,7 @@ if enable_prof:
     )
     prof.start()
 
+
 while iter_num < max_iters:
     if enable_prof:
         prof.step()
@@ -231,8 +231,9 @@ while iter_num < max_iters:
     dts.append(dt * 1000)
     if iter_num % log_interval == 0 and master_process:
         # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-        lossf = loss.item()
-        print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms")
+        #lossf = loss.item()
+        #print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms")
+        print(f"{iter_num} | lr {lr:e} | {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
 
@@ -251,3 +252,4 @@ if enable_prof:
 t = np.mean(dts[1:])
 if dist.get_rank() == 0:
     output_statistics ("ds", t, memory)
+

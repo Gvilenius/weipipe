@@ -2,23 +2,17 @@ import os
 import csv
 import argparse
 from utils import get_env, set_env
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3,4,5,7'
-
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--ngpu", default=8, type=int)
-parser.add_argument("--algo", default="zb1", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show"])
+parser.add_argument("--algo", default="scale", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show", "warm"])
 parser.add_argument("--rank", default=0, type=int)
 parser.add_argument("--nnode", default=1, type=int)
-
+parser.add_argument("--master_addr", default="localhost", type=str)
 
 args = parser.parse_args()
-
-
-master_addr = "localhost"
+master_addr = args.master_addr
 master_port = "10086"
-
 
 # launch args
 set_env ("MASTER_ADDR", master_addr)
@@ -42,33 +36,48 @@ set_env ("RANK", args.rank)
 # model args
 set_env("HIDDEN_SIZE", 1024)
 set_env("ATTENTION_HEADS", 32)
-set_env("SEQ_LEN", 1024)
+set_env("SEQ_LEN", 16384)
 
 
 # training args
-set_env("MICRO_BATCH_SIZE", 2)
-set_env("ACC_STEP", 4)
-set_env("CHECKPOINTING", 1)
+set_env("MICRO_BATCH_SIZE", 1)
+set_env("ACC_STEP", 1)
+set_env("CHECKPOINTING", "1")
 set_env("TRAIN_EMBEDDING", 0)
-set_env("EXIT_INTERVAL", 4)
+set_env("EXIT_INTERVAL", 2)
 
-set_env("PROF", 1)
+set_env("PROF", 0)
 
-def run_single(algo, ngpu_per_node):
-    set_env("ALGO", algo)     
+def run_base():
+    set_env("LAYERS", args.ngpu)
+    for seq in [4096, 8192, 16384]:
+        for acc_step in [4, 8]:
+            for micro_batch_size in [4,8]:
+                set_env("MICRO_BATCH_SIZE", micro_batch_size)
+                set_env("ACC_STEP", acc_step)
+                set_env("SEQ_LEN", seq)
+                run_all(args.ngpu//args.nnode, args.nnode)
+
+def run_single(algo, ngpu_per_node, nnode):
+    set_env("ALGO", algo)    
+    ngpu = ngpu_per_node * nnode
+    
+    init_env(ngpu=ngpu, nnode=nnode)
+     
     if os.environ["ALGO"] == "zb1":
         set_env("ENABLE_ZERO_BUBBLE", 1)
-        set_env("ZERO_BUBBLE_MEM_LIMIT", 1 * args.ngpu)
+        set_env("ZERO_BUBBLE_MEM_LIMIT", ngpu)
         os.system(
             "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
         )
     elif os.environ["ALGO"] == "zb2":
         set_env("ENABLE_ZERO_BUBBLE", 1)
-        set_env("ZERO_BUBBLE_MEM_LIMIT", 2 * args.ngpu)
+        set_env("ZERO_BUBBLE_MEM_LIMIT", 2 * ngpu)
         os.system(
             "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
         )
     elif os.environ["ALGO"] == "1f1b":
+        os.environ["ENABLE_ZERO_BUBBLE"]=""
         os.system(
             "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
         )
@@ -78,23 +87,35 @@ def run_single(algo, ngpu_per_node):
     #         "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
     #     )
     elif os.environ["ALGO"] == "ds":
-        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={args.nnode} --node-rank={args.rank} train-ds.py")
+        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ds.py")
     elif os.environ["ALGO"] == "wei":
-        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={args.nnode} --node-rank={args.rank} train-weipipe.py")
+        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-weipipe.py")
     else:
-        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={args.nnode} --node-rank={args.rank} train-ddp.py")
+        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ddp.py")
     
+def warm_seq_len():
+    for seq_len in [4096, 8192, 16384]:
+        set_env("SEQ_LEN", seq_len)
+        run_single("1f1b", args.ngpu, 1) 
+
+
 def run_scale():
-    set_env("LAYERS", 4)
-    for ngpu_per_node in [2, 4]:
-        init_env(ngpu_per_node, nnode=args.nnode)
-        run_all(ngpu_per_node=ngpu_per_node)
+    nnode = 1
+    set_env("LAYERS", 2)
+    set_env("HIDDEN_SIZE", 1024)
+    set_env("ATTENTION_HEADS", 32)
+    set_env("MICRO_BATCH_SIZE", 1)
+    set_env("ACC_STEP", 2)
+    
+    set_env("SEQ_LEN", 1024)
+    for ngpu_per_node in [2]:
+        run_all(ngpu_per_node=ngpu_per_node, nnode=nnode)
 
 
-def run_all(ngpu_per_node):
+def run_all(ngpu_per_node, nnode):
     algos = ["zb1", "zb2", "wei", "ds", "1f1b"]
     for algo in algos:
-        run_single(algo, ngpu_per_node=ngpu_per_node)
+        run_single(algo, ngpu_per_node=ngpu_per_node, nnode=nnode)
     show_all()
 def show_all():
     def print_histogram(data):
@@ -161,15 +182,16 @@ def show_all():
     # print_time()
 
 if __name__ == "__main__":
-    set_env("LAYERS", 4)
-    init_env(args.ngpu, args.nnode)
+    set_env("LAYERS", args.ngpu)
     
     if args.algo == "all":
-        run_all(args.ngpu)
+        run_all(args.ngpu, nnode=args.nnode)
     elif args.algo == "scale":
         run_scale()
     elif args.algo == "show":
         show_all()
+    elif args.algo == "warm":
+        warm_seq_len()
     else:
-        run_single(args.algo, ngpu_per_node=args.ngpu)
+        run_single(args.algo, ngpu_per_node=args.ngpu, nnode=args.nnode)
     

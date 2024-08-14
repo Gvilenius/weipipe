@@ -1,5 +1,4 @@
 from weipipe import WeiPipe
-from actpipe import ActPipe
 import time
 import json
 from functools import partial
@@ -174,3 +173,5 @@ if __name__ == "__main__":
     t = np.mean(dts[1:])
     if dist.get_rank() == 0:
         output_statistics("weipipe", t, memory)
+
+    dist.destroy_process_group()

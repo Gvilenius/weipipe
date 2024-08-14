@@ -31,7 +31,7 @@ def output_statistics(fname, t, memory):
         v = 32000
         memory = f"{memory:.2f}"
 
-        nparam = (12 * l * h**2 + 2*v*h) / 1024**2
+        nparam = (12 * l * h**2 + v*h) / 1024**2
         if init:
             writer.writerow (["nparam/M", "ngpu", "nlayer", "hidden", "seq_len", "n_micro", "mb", "time", "memory"])
         writer.writerow([nparam, world_size, l, h, s, acc_step, m, int(t), memory])

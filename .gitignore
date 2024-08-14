@@ -4,4 +4,4 @@ tmp
 test.py
 .vscode
 *trace.json
-result/*
+result/*.csv
