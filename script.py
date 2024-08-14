@@ -17,34 +17,41 @@ parser.add_argument("--mode", default="single", type=str, choices=["single", "al
 args = parser.parse_args()
 
 
-ngpu_per_node = args.ngpu // args.nnode
 master_addr = "localhost"
 master_port = "10086"
+
 
 # launch args
 set_env ("MASTER_ADDR", master_addr)
 set_env ("MASTER_PORT", master_port)
+
+def init_env(ngpu, nnode):
+    set_env ("PIPELINE_SIZE", ngpu)
+    
+    ngpu_per_node = ngpu // nnode
+    set_env ("GPUS_PER_NODE", ngpu_per_node)
+    
+    set_env(
+        "GLOBAL_BATCH_SIZE",
+        get_env("MICRO_BATCH_SIZE") * get_env("ACC_STEP") * ngpu,
+    )
+
 set_env ("RANK", args.rank)
 set_env ("WORLD_SIZE", args.nnode)
-set_env ("GPUS_PER_NODE", ngpu_per_node)
-set_env ("PIPELINE_SIZE", args.ngpu)
 
 # model args
 set_env("HIDDEN_SIZE", 1024)
 set_env("ATTENTION_HEADS", 32)
-set_env("SEQ_LEN", 2048)
-set_env("LAYERS", args.ngpu*2)
+set_env("SEQ_LEN", 4096)
+
 
 # training args
-set_env("MICRO_BATCH_SIZE", 6)
-set_env("ACC_STEP", 2)
+set_env("MICRO_BATCH_SIZE", 4)
+set_env("ACC_STEP", 4)
 set_env("CHECKPOINTING", 1)
 set_env("TRAIN_EMBEDDING", 0)
-set_env("EXIT_INTERVAL", 2)
-set_env(
-    "GLOBAL_BATCH_SIZE",
-    get_env("MICRO_BATCH_SIZE") * get_env("ACC_STEP") * args.ngpu,
-)
+set_env("EXIT_INTERVAL", 4)
+
 
 def run_single(algo, ngpu_per_node):
     set_env("ALGO", algo)     
@@ -77,11 +84,10 @@ def run_single(algo, ngpu_per_node):
         os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={args.nnode} --node-rank={args.rank} train-ddp.py")
     
 def run_scale():
-
     set_env("LAYERS", 4)
     for ngpu_per_node in [2, 4]:
-        set_env ("PIPELINE_SIZE", ngpu_per_node)
-        set_env ("GPUS_PER_NODE", ngpu_per_node)
+        set_env("PIPELINE_SIZE", ngpu_per_node)
+        set_env("GPUS_PER_NODE", ngpu_per_node)
         set_env("MICRO_BATCH_SIZE", ngpu_per_node)
         run_all(ngpu_per_node=ngpu_per_node)
 
@@ -156,10 +162,13 @@ def show_all():
     print_time()
 
 if __name__ == "__main__":
+    set_env("LAYERS", 8)
+    init_env(args.ngpu, args.nnode)
+    
     if args.mode == "single":
-        run_single(args.algo, ngpu_per_node=ngpu_per_node)
+        run_single(args.algo, ngpu_per_node=args.ngpu)
     elif args.mode == "all":
-        run_all()
+        run_all(args.ngpu)
     elif args.mode == "scale":
         run_scale()
     

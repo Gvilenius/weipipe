@@ -2,14 +2,14 @@ import math
 import struct
 import inspect
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import  Optional, Tuple
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn.functional as F
 from torch import nn
-import deepspeed
+import os
 from torch.utils.checkpoint import checkpoint as ckpt
 
 @dataclass
@@ -209,12 +209,13 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
-        if deepspeed.checkpointing.is_configured():
-            return deepspeed.checkpointing.checkpoint(
-                self.forward_, x, freqs_cos, freqs_sin
+
+        if int(os.environ["CHECKPOINTING"]) == 1:
+            return ckpt(
+                self.forward_, x, freqs_cos, freqs_sin, use_reentrant=False
             )
-        else:
-            return self.forward_(x, freqs_cos, freqs_sin)
+            
+        return self.forward_(x, freqs_cos, freqs_sin)
 
     def forward_(self, x, freqs_cos, freqs_sin):
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
@@ -280,9 +281,10 @@ class Transformer(nn.Module):
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
 
+
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
-            # h = torch.utils.checkpoint.checkpoint(layer, h, freqs_cos, freqs_sin)
+        
         h = self.norm(h)
 
         if targets is not None:
@@ -485,11 +487,11 @@ class Layer(nn.Module):
         freqs_sin = self.freqs_sin[:seq_len]
         h = tokens
 
-        if self.enable_checkpointing:
-            for layer in self.decoders:
-                h = ckpt (layer, h, freqs_cos, freqs_sin, use_reentrant=True)
-        else:
-            for layer in self.decoders:
-                h = layer(h, freqs_cos, freqs_sin)
-                
+        # if self.enable_checkpointing:
+        #     for layer in self.decoders:
+        #         h = ckpt (layer, h, freqs_cos, freqs_sin, use_reentrant=True)
+        # else:
+        for layer in self.decoders:
+            h = layer(h, freqs_cos, freqs_sin)
+            
         return h

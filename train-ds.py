@@ -157,17 +157,12 @@ ds_config = {
         "stage": args.stage,
         "contiguous_gradients": False,
         "overlap_comm": True,
-        # "stage3_max_live_parameters": 1e5,
-        # "stage3_max_reuse_distance": 0,
+        "stage3_max_live_parameters": (12 * n_layers * dim**2 + 2*32000*dim) / world_size,
+        "stage3_max_reuse_distance": 0,
         # "stage3_prefetch_bucket_size": 1e9,
         # "stage3_param_persistence_threshold": 10,
     },
 }
-
-# optimizer
-# optimizer = model.configure_optimizers(
-#     weight_decay, learning_rate, (beta1, beta2), device_type
-# )
 
 # from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_cold
 # estimate_zero3_model_states_mem_needs_all_cold(model, num_gpus_per_node=2, num_nodes=1)
@@ -203,19 +198,26 @@ t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 
 running_mfu = -1.0
-# prof = torch.profiler.profile(
-#     schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=1),
-#     record_shapes=True,
-#     with_stack=False,
-#     # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-# )
+
 dts = []
 
 
+enable_prof = False
+
+if enable_prof:
+    prof = torch.profiler.profile(
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
+        record_shapes=False,
+        with_stack=False,
+        # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    )
+    prof.start()
+
 while iter_num < max_iters:
+    if enable_prof:
+        prof.step()
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
-    
     for i in range(gradient_accumulation_steps):
         loss = model(X, Y)
         model.backward(loss)
@@ -240,8 +242,10 @@ while iter_num < max_iters:
         print(f"rank{local_rank} max memory used: {memory:.2f}G")
 
 
-# if rank == 0:
-# prof.export_chrome_trace("trace.json")
+if enable_prof:
+    prof.stop()
+    if rank == 0:
+        prof.export_chrome_trace("trace.json")
 
 
 

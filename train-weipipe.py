@@ -134,15 +134,6 @@ if __name__ == "__main__":
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
 
-        if (iter_num + 1) % eval_interval == 0:
-            transformer = model.get_full_transformer()
-            if dist.get_rank() == 0:
-                loss = estimate_loss(transformer)
-                print(f" loss eval is {loss}")
-                out_dir = "out"
-                print(f"saving checkpoint to {out_dir}")
-                transformer.export(os.path.join(out_dir, "model.bin"))
-
         loss = model.forward_backward_step(train_batch_iter)
         # print(prof.key_averages().table(sort_by="cuda_time"))
 
@@ -152,19 +143,18 @@ if __name__ == "__main__":
         dts.append(dt * 1000)
 
         start = time.time()
-        loss = loss.item()
+        # loss = loss.item()
         if iter_num % 1 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-            print(
-                f"{iter_num} | loss {loss:.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
-            )
             # print(
-            #     f"{iter_num} | lr {lr:e} | time {dt*1000 :.2f}ms",
+            #     f"{iter_num} | loss {loss:.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
             # )
-
-        if iter_num < 3:
             memory = torch.cuda.max_memory_allocated() / 1024**3
-            print_rank(0, f"max memory used: {memory:.2f}G")
+            
+            print(
+                f"{iter_num} | time {dt*1000 :.2f}ms | memory {memory:.2f} G",
+            )
+
 
         iter_num += 1
     # if dist.get_rank() == 0:
