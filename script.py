@@ -8,11 +8,10 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3,4,5,7'
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--ngpu", default=8, type=int)
-parser.add_argument("--algo", default="zb1", type=str, choices=["zb1", "zb2", "wei", "ds", "1f1b", "ddp"])
+parser.add_argument("--algo", default="zb1", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp"])
 parser.add_argument("--rank", default=0, type=int)
 parser.add_argument("--nnode", default=1, type=int)
 
-parser.add_argument("--mode", default="single", type=str, choices=["single", "all", "scale"])
 
 args = parser.parse_args()
 
@@ -52,6 +51,7 @@ set_env("CHECKPOINTING", 1)
 set_env("TRAIN_EMBEDDING", 0)
 set_env("EXIT_INTERVAL", 4)
 
+set_env("PROF", 1)
 
 def run_single(algo, ngpu_per_node):
     set_env("ALGO", algo)     
@@ -162,13 +162,13 @@ def show_all():
     print_time()
 
 if __name__ == "__main__":
-    set_env("LAYERS", 8)
+    set_env("LAYERS", 4)
     init_env(args.ngpu, args.nnode)
     
-    if args.mode == "single":
-        run_single(args.algo, ngpu_per_node=args.ngpu)
-    elif args.mode == "all":
+    if args.algo == "all":
         run_all(args.ngpu)
-    elif args.mode == "scale":
+    elif args.algo == "scale":
         run_scale()
+    else:
+        run_single(args.algo, ngpu_per_node=args.ngpu)
     

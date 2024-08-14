@@ -122,15 +122,23 @@ if __name__ == "__main__":
     start = time.time()
     n_total_samples = 0
 
-    # while n_total_samples < 64 * 100 + 1:
-    prof = profile(
-        schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=1),
-        record_shapes=False,
-        with_stack=False,
-        # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    )
+    
+    enable_prof = bool(int(os.environ["PROF"]))
+    if enable_prof:
+        prof = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
+            record_shapes=False,
+            with_stack=False,
+            # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        )
+        prof.start()
+    
     dts = []
     while iter_num < iters_num:
+        
+        if enable_prof:
+            prof.step()
+            
         lr = get_lr(learning_rate, iter_num)
         model.set_lr(lr)
 
@@ -157,9 +165,12 @@ if __name__ == "__main__":
 
 
         iter_num += 1
-    # if dist.get_rank() == 0:
-    #    prof.export_chrome_trace("trace.json")
+        
+    if enable_prof:
+        prof.stop()
+        if dist.get_rank() == 0:
+            prof.export_chrome_trace("/workspace/weipipe/weipipe-trace.json")
 
-    t = f"{np.mean(dts[1:]):.2f}"
+    t = np.mean(dts[1:])
     if dist.get_rank() == 0:
         output_statistics("weipipe", t, memory)

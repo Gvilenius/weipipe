@@ -190,17 +190,36 @@ local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
 running_mfu = -1.0
 
+enable_prof = bool(int(os.environ["PROF"]))
+if enable_prof:
+    prof = torch.profiler.profile(
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
+        record_shapes=False,
+        with_stack=False,
+        # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    )
+    prof.start()
+        
 dts = []
 while iter_num < max_iters:
+    if enable_prof:
+        prof.step()
+            
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     
-    for i in range(gradient_accumulation_steps):
-        with ctx:
-            loss = model(X, Y)
+    for i in range(gradient_accumulation_steps-1):
+        with model.no_sync():
+            with ctx:
+                loss = model(X, Y)
         X, Y = next(train_batch_iter)
         loss.backward()
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
+        
+    with ctx:
+            loss = model(X, Y)
+    X, Y = next(train_batch_iter)
+    loss.backward()
+    
     optimizer.step()
     optimizer.zero_grad()
 
@@ -221,12 +240,13 @@ while iter_num < max_iters:
         print(f"rank{ddp_local_rank} max memory used: {memory:.2f}G")
 
 
-# if ddp_rank == 0:
-# prof.export_chrome_trace("trace.json")
+if enable_prof:
+    prof.stop()
+    if dist.get_rank() == 0:
+        prof.export_chrome_trace("/workspace/weipipe/ddp-trace.json")
 
 
-
-t = f"{np.mean(dts[1:]):.2f}"
+t = np.mean(dts[1:])
 if torch.distributed.get_rank() == 0:
     output_statistics ("ddp", t, memory)
 

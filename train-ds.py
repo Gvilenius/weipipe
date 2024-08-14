@@ -202,8 +202,7 @@ running_mfu = -1.0
 dts = []
 
 
-enable_prof = False
-
+enable_prof = bool(int(os.environ["PROF"]))
 if enable_prof:
     prof = torch.profiler.profile(
         schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
@@ -244,11 +243,11 @@ while iter_num < max_iters:
 
 if enable_prof:
     prof.stop()
-    if rank == 0:
-        prof.export_chrome_trace("trace.json")
+    if dist.get_rank() == 0:
+        prof.export_chrome_trace("/workspace/weipipe/ds-trace.json")
 
 
 
-t = f"{np.mean(dts[1:]):.2f}"
+t = np.mean(dts[1:])
 if dist.get_rank() == 0:
     output_statistics ("ds", t, memory)
