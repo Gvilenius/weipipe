@@ -1,8 +1,0 @@
-[Rank 3] (after 1 iterations) memory (MB) | max allocated: 2719.5
-[Rank 2] (after 1 iterations) memory (MB) | max allocated: 3457.8
-[Rank 0] (after 1 iterations) memory (MB) | max allocated: 2727.4
-[Rank 1] (after 1 iterations) memory (MB) | max allocated: 3457.8
-[Rank 3] (after 2 iterations) memory (MB) | max allocated: 2751.9
-[Rank 0] (after 2 iterations) memory (MB) | max allocated: 2761.0
-[Rank 1] (after 2 iterations) memory (MB) | max allocated: 3491.5
-[Rank 2] (after 2 iterations) memory (MB) | max allocated: 3491.0

@@ -8,7 +8,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3,4,5,7'
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--ngpu", default=8, type=int)
-parser.add_argument("--algo", default="zb1", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp"])
+parser.add_argument("--algo", default="zb1", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show"])
 parser.add_argument("--rank", default=0, type=int)
 parser.add_argument("--nnode", default=1, type=int)
 
@@ -34,18 +34,19 @@ def init_env(ngpu, nnode):
         "GLOBAL_BATCH_SIZE",
         get_env("MICRO_BATCH_SIZE") * get_env("ACC_STEP") * ngpu,
     )
+    set_env ("WORLD_SIZE", args.nnode)
+    
 
 set_env ("RANK", args.rank)
-set_env ("WORLD_SIZE", args.nnode)
 
 # model args
 set_env("HIDDEN_SIZE", 1024)
 set_env("ATTENTION_HEADS", 32)
-set_env("SEQ_LEN", 4096)
+set_env("SEQ_LEN", 1024)
 
 
 # training args
-set_env("MICRO_BATCH_SIZE", 4)
+set_env("MICRO_BATCH_SIZE", 2)
 set_env("ACC_STEP", 4)
 set_env("CHECKPOINTING", 1)
 set_env("TRAIN_EMBEDDING", 0)
@@ -86,9 +87,7 @@ def run_single(algo, ngpu_per_node):
 def run_scale():
     set_env("LAYERS", 4)
     for ngpu_per_node in [2, 4]:
-        set_env("PIPELINE_SIZE", ngpu_per_node)
-        set_env("GPUS_PER_NODE", ngpu_per_node)
-        set_env("MICRO_BATCH_SIZE", ngpu_per_node)
+        init_env(ngpu_per_node, nnode=args.nnode)
         run_all(ngpu_per_node=ngpu_per_node)
 
 
@@ -96,7 +95,7 @@ def run_all(ngpu_per_node):
     algos = ["zb1", "zb2", "wei", "ds", "1f1b"]
     for algo in algos:
         run_single(algo, ngpu_per_node=ngpu_per_node)
-        
+    show_all()
 def show_all():
     def print_histogram(data):
         data = dict(sorted (data.items(), key=lambda kv:(kv[1], kv[0])))
@@ -157,9 +156,9 @@ def show_all():
         print_histogram(graph)
 
 
-    print_mem()
-    print()
-    print_time()
+    # print_mem()
+    # print()
+    # print_time()
 
 if __name__ == "__main__":
     set_env("LAYERS", 4)
@@ -169,6 +168,8 @@ if __name__ == "__main__":
         run_all(args.ngpu)
     elif args.algo == "scale":
         run_scale()
+    elif args.algo == "show":
+        show_all()
     else:
         run_single(args.algo, ngpu_per_node=args.ngpu)
     

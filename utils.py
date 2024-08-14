@@ -34,7 +34,7 @@ def output_statistics(fname, t, memory):
         nparam = (12 * l * h**2 + 2*v*h) / 1024**2
         if init:
             writer.writerow (["nparam/M", "ngpu", "nlayer", "hidden", "seq_len", "n_micro", "mb", "time", "memory"])
-        writer.writerow([nparam, world_size, l, h, s, acc_step, m, t, memory])
+        writer.writerow([nparam, world_size, l, h, s, acc_step, m, int(t), memory])
 
 def get_lr(learning_rate, it, warmup_iters=0, lr_decay_iters=100000, min_lr=0.0):
     # 1) linear warmup for warmup_iters steps
