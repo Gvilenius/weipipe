@@ -1,11 +1,13 @@
 import os
+import subprocess
+
 import csv
 import argparse
 from utils import get_env, set_env
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--ngpu", default=8, type=int)
-parser.add_argument("--algo", default="scale", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show", "warm"])
+parser.add_argument("--algo", default="scale", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show", "base"])
 parser.add_argument("--rank", default=0, type=int)
 parser.add_argument("--nnode", default=1, type=int)
 parser.add_argument("--master_addr", default="localhost", type=str)
@@ -58,6 +60,8 @@ def run_base():
                 set_env("SEQ_LEN", seq)
                 run_all(args.ngpu//args.nnode, args.nnode)
 
+        
+
 def run_single(algo, ngpu_per_node, nnode):
     set_env("ALGO", algo)    
     ngpu = ngpu_per_node * nnode
@@ -67,36 +71,37 @@ def run_single(algo, ngpu_per_node, nnode):
     if os.environ["ALGO"] == "zb1":
         set_env("ENABLE_ZERO_BUBBLE", 1)
         set_env("ZERO_BUBBLE_MEM_LIMIT", ngpu)
-        os.system(
-            "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
-        )
+        cmd = "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
+        
     elif os.environ["ALGO"] == "zb2":
         set_env("ENABLE_ZERO_BUBBLE", 1)
         set_env("ZERO_BUBBLE_MEM_LIMIT", 2 * ngpu)
-        os.system(
-            "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
-        )
+        cmd = "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
+        
     elif os.environ["ALGO"] == "1f1b":
         os.environ["ENABLE_ZERO_BUBBLE"]=""
-        os.system(
-            "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
-        )
+        cmd = "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
+
     # elif os.environ["ALGO"] == "1f1bi":
     #     set_env("INTERLEAVED_1F1B", 1)
     #     os.system(
     #         "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
     #     )
     elif os.environ["ALGO"] == "ds":
-        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ds.py")
+        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ds.py"
     elif os.environ["ALGO"] == "wei":
-        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-weipipe.py")
+        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-weipipe.py"
     else:
-        os.system(f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ddp.py")
+        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ddp.py"
     
-def warm_seq_len():
-    for seq_len in [4096, 8192, 16384]:
-        set_env("SEQ_LEN", seq_len)
-        run_single("1f1b", args.ngpu, 1) 
+    try:
+        process = subprocess.Popen(cmd, shell=True)
+        process.communicate()
+    except KeyboardInterrupt:
+        import signal
+        os.killpg(os.getpid(process.pid), signal.SIGKILL)
+        exit()
+
 
 
 def run_scale():
@@ -117,6 +122,8 @@ def run_all(ngpu_per_node, nnode):
     for algo in algos:
         run_single(algo, ngpu_per_node=ngpu_per_node, nnode=nnode)
     show_all()
+    
+    
 def show_all():
     def print_histogram(data):
         data = dict(sorted (data.items(), key=lambda kv:(kv[1], kv[0])))
@@ -190,8 +197,8 @@ if __name__ == "__main__":
         run_scale()
     elif args.algo == "show":
         show_all()
-    elif args.algo == "warm":
-        warm_seq_len()
+    elif args.algo == "base":
+        run_base()
     else:
         run_single(args.algo, ngpu_per_node=args.ngpu, nnode=args.nnode)
     
