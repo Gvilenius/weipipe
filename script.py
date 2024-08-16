@@ -8,9 +8,11 @@ from utils import get_env, set_env
 parser = argparse.ArgumentParser()
 parser.add_argument("--ngpu", default=8, type=int)
 parser.add_argument("--algo", default="scale", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show", "base"])
-parser.add_argument("--rank", default=0, type=int)
 parser.add_argument("--nnode", default=1, type=int)
 parser.add_argument("--master_addr", default="localhost", type=str)
+
+set_env ("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+set_env ("CUDA_DEVICE_MAX_CONNECTIONS", 1)
 
 args = parser.parse_args()
 master_addr = args.master_addr
@@ -19,7 +21,8 @@ master_port = "10086"
 # launch args
 set_env ("MASTER_ADDR", master_addr)
 set_env ("MASTER_PORT", master_port)
-
+set_env ("WEIPIPE_DIR", "/workspace/weipipe")
+ 
 def init_env(ngpu, nnode):
     set_env ("PIPELINE_SIZE", ngpu)
     
@@ -32,29 +35,28 @@ def init_env(ngpu, nnode):
     )
     set_env ("WORLD_SIZE", args.nnode)
     
-
-set_env ("RANK", args.rank)
-
 # model args
 set_env("HIDDEN_SIZE", 1024)
 set_env("ATTENTION_HEADS", 32)
-set_env("SEQ_LEN", 16384)
+set_env("SEQ_LEN", 4096)
 
 
 # training args
 set_env("MICRO_BATCH_SIZE", 1)
 set_env("ACC_STEP", 1)
+
 set_env("CHECKPOINTING", "1")
 set_env("TRAIN_EMBEDDING", 0)
 set_env("EXIT_INTERVAL", 2)
 
 set_env("PROF", 0)
 
+
 def run_base():
     set_env("LAYERS", args.ngpu)
     for seq in [4096, 8192, 16384]:
-        for acc_step in [4, 8]:
-            for micro_batch_size in [4,8]:
+        for acc_step in [2, 4]:
+            for micro_batch_size in [2,4]:
                 set_env("MICRO_BATCH_SIZE", micro_batch_size)
                 set_env("ACC_STEP", acc_step)
                 set_env("SEQ_LEN", seq)
@@ -65,7 +67,8 @@ def run_base():
 def run_single(algo, ngpu_per_node, nnode):
     set_env("ALGO", algo)    
     ngpu = ngpu_per_node * nnode
-    
+
+    rank = int (os.environ["RANK"])
     init_env(ngpu=ngpu, nnode=nnode)
      
     if os.environ["ALGO"] == "zb1":
@@ -88,11 +91,11 @@ def run_single(algo, ngpu_per_node, nnode):
     #         "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
     #     )
     elif os.environ["ALGO"] == "ds":
-        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ds.py"
+        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-ds.py"
     elif os.environ["ALGO"] == "wei":
-        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-weipipe.py"
+        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-weipipe.py"
     else:
-        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={args.rank} train-ddp.py"
+        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-ddp.py"
     
     try:
         process = subprocess.Popen(cmd, shell=True)
@@ -105,20 +108,21 @@ def run_single(algo, ngpu_per_node, nnode):
 
 
 def run_scale():
-    nnode = 1
-    set_env("LAYERS", 2)
+    nnode = args.nnode 
+    set_env("LAYERS", 32)
+
     set_env("HIDDEN_SIZE", 1024)
     set_env("ATTENTION_HEADS", 32)
-    set_env("MICRO_BATCH_SIZE", 1)
+    
+    set_env("MICRO_BATCH_SIZE", 2)
     set_env("ACC_STEP", 2)
     
-    set_env("SEQ_LEN", 1024)
-    for ngpu_per_node in [2]:
-        run_all(ngpu_per_node=ngpu_per_node, nnode=nnode)
+    set_env("SEQ_LEN", 16384)
+    run_all(ngpu_per_node=args.ngpu//args.nnode, nnode=args.nnode)
 
 
 def run_all(ngpu_per_node, nnode):
-    algos = ["zb1", "zb2", "wei", "ds", "1f1b"]
+    algos = ["wei", "ds", "1f1b", "zb1", "zb2"]
     for algo in algos:
         run_single(algo, ngpu_per_node=ngpu_per_node, nnode=nnode)
     show_all()
@@ -133,8 +137,8 @@ def show_all():
             bar = '*' * int( v / max_v * 50)  # 假设最大宽度为20
             print(f"{k}: {bar}")
 
-    
     dir = "/workspace/weipipe/result"
+    
     files = os.listdir(dir)
     files = [ f for f in files if f.endswith("csv") if f != "all.csv"]
 
@@ -152,8 +156,6 @@ def show_all():
             for row in reader:
                 r = row
             rs.append (r + [os.path.splitext(file)[0]])
-            
-            # f.writerow (file, r[-2], r[-1])
 
     fname = os.path.join(dir, "all.csv")
 
@@ -189,7 +191,7 @@ def show_all():
     # print_time()
 
 if __name__ == "__main__":
-    set_env("LAYERS", args.ngpu)
+    set_env("LAYERS", 8)
     
     if args.algo == "all":
         run_all(args.ngpu, nnode=args.nnode)

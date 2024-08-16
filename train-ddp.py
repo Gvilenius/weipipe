@@ -243,7 +243,7 @@ while iter_num < max_iters:
 if enable_prof:
     prof.stop()
     if dist.get_rank() == 0:
-        prof.export_chrome_trace("/workspace/weipipe/ddp-trace.json")
+        prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + "/ddp-trace.json")
 
 
 t = np.mean(dts[1:])

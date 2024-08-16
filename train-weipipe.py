@@ -168,10 +168,11 @@ if __name__ == "__main__":
     if enable_prof:
         prof.stop()
         if dist.get_rank() == 0:
-            prof.export_chrome_trace("/workspace/weipipe/weipipe-trace.json")
+            prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + "/weipipe-trace.json")
 
     t = np.mean(dts[1:])
     if dist.get_rank() == 0:
         output_statistics("weipipe", t, memory)
 
+    dist.barrier()
     dist.destroy_process_group()

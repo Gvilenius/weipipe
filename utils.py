@@ -18,7 +18,7 @@ def get_env(k):
 
 def output_statistics(fname, t, memory):
     world_size = dist.get_world_size()
-    fname = "/workspace/weipipe/result/{}.csv".format(fname)
+    fname = os.environ["WEIPIPE_DIR"]  + "/result/{}.csv".format(fname)
     init = not os.path.exists (fname)
     with open(fname, "a") as f:
         writer = csv.writer(f)

@@ -245,7 +245,7 @@ while iter_num < max_iters:
 if enable_prof:
     prof.stop()
     if dist.get_rank() == 0:
-        prof.export_chrome_trace("/workspace/weipipe/ds-trace.json")
+        prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + "/ds-trace.json")
 
 
 
