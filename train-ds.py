@@ -12,7 +12,11 @@ from model import Transformer, ModelArgs
 from tinystories import Task
 import argparse
 import logging
-from utils import get_env, output_statistics, print_rank
+
+import utils
+
+from utils import get_env, get_lr, print_rank
+
 import numpy as np 
 
 deepspeed_logger = logging.getLogger("DeepSpeed")
@@ -48,12 +52,11 @@ max_iters = get_env("EXIT_INTERVAL")
 
 multiple_of = 32
 dropout = 0.0
-learning_rate = 1e-5
 
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
-grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
+grad_clip = 0.0  # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 0  # how many steps to warm up for
@@ -61,8 +64,7 @@ warmup_iters = 0  # how many steps to warm up for
 device = (
     "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 )
-dtype = "bfloat16"  # float32|bfloat16|float16
-compile = False  # use PyTorch 2.0 to compile the model to be faster
+
 # -----------------------------------------------------------------------------
 config_keys = [
     k
@@ -82,7 +84,7 @@ min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 device = f"cuda:{local_rank}"
 torch.cuda.set_device(device)
 master_process = rank == 0  # this process will do logging, checkpointing etc.
-seed_offset = rank  # each process gets a different seed
+
 # world_size number of processes will be training simultaneously, so we can scale
 # down the desired gradient accumulation iterations per process proportionally
 
@@ -92,7 +94,7 @@ tokens_per_iter = (
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset)
+torch.manual_seed(1234)
 torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
 device_type = "cuda" if "cuda" in device else "cpu"  # for later use in torch.autocast
@@ -128,8 +130,12 @@ if master_process:
     
 gptconf = ModelArgs(**model_args)
 model = Transformer(gptconf)
-
+# n=0
+# for p in model.layers[0].parameters():
+#     n+= p.numel()
+# print(n,"--", 12*dim**2)
 if not bool(get_env("TRAIN_EMBEDDING")):
+    print("freeze_embedding")
     model.tok_embeddings.weight.requires_grad = False
 
 model.to(device)
@@ -138,12 +144,12 @@ model.to(device)
 
 if bool(get_env("CHECKPOINTING")):
     ds.checkpointing.configure(None)
-    
+
 ds_config = {
     "train_micro_batch_size_per_gpu": micro_batch_size,
     "optimizer": {
         "type": "AdamW",
-        "params": {"lr": 5e-4, "betas": [beta1, beta2], "weight_decay": weight_decay},
+        "params": {"lr": 1e-3, "betas": [beta1, beta2], "weight_decay": weight_decay},
     },
     "gradient_clipping": grad_clip,
     # "bf16": {
@@ -151,16 +157,17 @@ ds_config = {
     # },
     "fp16": {
         "enabled": True,
+        "loss_scale" : 1,
     },
     "gradient_accumulation_steps": gradient_accumulation_steps,
     "zero_optimization": {
-        "stage": args.stage,
+        "stage": 3,
         "contiguous_gradients": False,
         "overlap_comm": True,
-        "stage3_max_live_parameters": (12 * n_layers * dim**2 + 2*32000*dim) / world_size,
+        "stage3_max_live_parameters": 12 * dim**2 ,
         "stage3_max_reuse_distance": 0,
-        # "stage3_prefetch_bucket_size": 1e9,
-        # "stage3_param_persistence_threshold": 10,
+        "stage3_prefetch_bucket_size": 12 * dim**2,
+        "stage3_param_persistence_threshold": 10,
     },
 }
 
@@ -170,25 +177,14 @@ ds_config = {
 if rank == 0:
     print("num parameters: ", sum(p.numel() for p in model.parameters()) / 1e9, "e9")
 
+
+
+
 model, _, _, _ = ds.initialize(
     model=model, model_parameters=model.parameters(), config=ds_config
 )
+
 model.train()
-
-# learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
-    if it < warmup_iters:
-        return learning_rate * it / warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > lr_decay_iters:
-        return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
-
 
 # training loop
 train_batch_iter = iter_batches("train")
@@ -203,12 +199,7 @@ dts = []
 
 enable_prof = bool(int(os.environ["PROF"]))
 if enable_prof:
-    prof = torch.profiler.profile(
-        schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
-        record_shapes=False,
-        with_stack=False,
-        # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    )
+    prof = utils.get_profiler()
     prof.start()
 
 
@@ -216,7 +207,6 @@ while iter_num < max_iters:
     if enable_prof:
         prof.step()
     # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if decay_lr else learning_rate
     for i in range(gradient_accumulation_steps):
         loss = model(X, Y)
         model.backward(loss)
@@ -225,15 +215,16 @@ while iter_num < max_iters:
         X, Y = next(train_batch_iter)
 
     # timing and logging
+    lossf = loss.item()
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
     dts.append(dt * 1000)
     if iter_num % log_interval == 0 and master_process:
         # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
-        #lossf = loss.item()
-        #print(f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms")
-        print(f"{iter_num} | lr {lr:e} | {dt*1000:.2f}ms")
+        
+        print(f"{iter_num} | loss {lossf:.4f} | {dt*1000:.2f}ms")
+        # print(f"{iter_num} | lr {lr:e} | {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
 
@@ -251,5 +242,5 @@ if enable_prof:
 
 t = np.mean(dts[1:])
 if dist.get_rank() == 0:
-    output_statistics ("ds", t, memory)
+    utils.output_statistics ("ds", t, memory)
 

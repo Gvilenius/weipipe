@@ -7,7 +7,7 @@ from utils import get_env, set_env
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--ngpu", default=8, type=int)
-parser.add_argument("--algo", default="scale", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show", "base"])
+parser.add_argument("--algo", default="scale", type=str, choices=["all", "scale", "zb1", "zb2", "wei", "ds", "1f1b", "ddp", "show", "base", "fsdp"])
 parser.add_argument("--nnode", default=1, type=int)
 parser.add_argument("--master_addr", default="localhost", type=str)
 
@@ -25,7 +25,6 @@ set_env ("WEIPIPE_DIR", "/workspace/weipipe")
  
 def init_env(ngpu, nnode):
     set_env ("PIPELINE_SIZE", ngpu)
-    
     ngpu_per_node = ngpu // nnode
     set_env ("GPUS_PER_NODE", ngpu_per_node)
     
@@ -36,18 +35,18 @@ def init_env(ngpu, nnode):
     set_env ("WORLD_SIZE", args.nnode)
     
 # model args
-set_env("HIDDEN_SIZE", 1024)
-set_env("ATTENTION_HEADS", 32)
-set_env("SEQ_LEN", 4096)
+set_env("HIDDEN_SIZE", 1024) 
+set_env("ATTENTION_HEADS", 16)
+set_env("SEQ_LEN", 512)
 
 
 # training args
-set_env("MICRO_BATCH_SIZE", 1)
+set_env("MICRO_BATCH_SIZE", 8)
 set_env("ACC_STEP", 1)
 
-set_env("CHECKPOINTING", "1")
+set_env("CHECKPOINTING", 1)
 set_env("TRAIN_EMBEDDING", 0)
-set_env("EXIT_INTERVAL", 2)
+set_env("EXIT_INTERVAL", 5)
 
 set_env("PROF", 0)
 
@@ -94,6 +93,8 @@ def run_single(algo, ngpu_per_node, nnode):
         cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-ds.py"
     elif os.environ["ALGO"] == "wei":
         cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-weipipe.py"
+    elif os.environ["ALGO"] == "fsdp":
+        cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-fsdp.py"
     else:
         cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-ddp.py"
     
@@ -191,7 +192,8 @@ def show_all():
     # print_time()
 
 if __name__ == "__main__":
-    set_env("LAYERS", 8)
+    set_env("LAYERS", args.ngpu)
+    # set_env("LAYERS", 1)
     
     if args.algo == "all":
         run_all(args.ngpu, nnode=args.nnode)

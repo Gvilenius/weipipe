@@ -8,6 +8,7 @@ import os
 import json
 import csv
 from model import Transformer, ModelArgs
+import numpy as np
 
 def set_env(k, v):
     os.environ[k] = str(v)
@@ -16,7 +17,22 @@ def get_env(k):
     return int(os.environ[k])
 
 
+def serialize_model(model, name="unnamed"):
+    array = np.array([])
+    for n, p in model.named_parameters():
+        print(n)
+        array = np.append(array, p.data.cpu().numpy())
+    np.savetxt(name, array, fmt="%.6f", delimiter="\n")
+    
+def serialize_grad(model, name="unnamed"):
+    array = np.array([])
+    for n, p in model.named_parameters():
+        print(n)
+        array = np.append(array, p.grad.data.cpu().numpy())
+    np.savetxt(name, array, fmt="%.6f", delimiter="\n")
+    
 def output_statistics(fname, t, memory):
+    return
     world_size = dist.get_world_size()
     fname = os.environ["WEIPIPE_DIR"]  + "/result/{}.csv".format(fname)
     init = not os.path.exists (fname)
@@ -84,6 +100,13 @@ def save_model(layers, optimizer, model_args, iter_num):
 def loss_fn(y_, y):
     return F.cross_entropy(y_.view(-1, y_.shape[-1]), y.view(-1))
 
+def get_profiler():
+    return torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
+            record_shapes=False,
+            with_stack=False,
+            # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        )
 
 def print_rank(rank, *x):
     if dist.get_rank() == rank:
@@ -102,8 +125,8 @@ def grad_to_tensor(model, tensor):
             data = p.grad.flatten()
             tensor[i : i + n] += data
         i += n
-
     model.zero_grad()
+
 
 
 def tensor_to_grad(tensor, model):
@@ -121,7 +144,7 @@ def init_tensor(n, dtype=torch.float16, init_func=torch.empty):
 def configure_optimizers(
     model,
     weight_decay=1e-1,
-    learning_rate=5e-4,
+    learning_rate=1e-3,
     betas=(0.9, 0.95),
     device_type="cuda",
 ):

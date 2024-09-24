@@ -11,8 +11,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from tinystories import Task
 import argparse
-from utils import output_statistics, get_env, get_profiler, serialize_model
+from utils import output_statistics, get_env, get_profiler
 import numpy as np
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import  MixedPrecision
 
 
 def init_process_group():
@@ -133,6 +135,8 @@ if ddp_rank == 0:
 
 gptconf = ModelArgs(**model_args)
 model = Transformer(gptconf)
+
+
 if not bool(get_env("TRAIN_EMBEDDING")):
     model.tok_embeddings.weight.requires_grad = False
 
@@ -142,17 +146,20 @@ model.to(device)
 # Ignore the `freqs_cis` buffer so that DDP does not broadcast it at
 # construction time since NCCL does not support `ComplexFloat`
 
-# optimizer
-optimizer = model.configure_optimizers(
-    weight_decay, learning_rate, (beta1, beta2), device_type
-)
+
 
 if ddp_rank == 0:
     print("num parameters: ", sum(p.numel() for p in model.parameters()) / 1e9, "e9")
 
 prefix = "_orig_mod." if compile else ""
 model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
-model = DDP(model)
+
+# model = FSDP(model, mixed_precision=MixedPrecision(param_dtype=torch.float16, cast_forward_inputs=True))
+model = FSDP(model)
+# optimizer
+optimizer = model.configure_optimizers(
+    weight_decay, learning_rate, (beta1, beta2), device_type
+)
 
 ctx = torch.amp.autocast(device_type=device_type, dtype=torch.float16)
 
@@ -175,22 +182,32 @@ while iter_num < max_iters:
     if enable_prof:
         prof.step()
     
+    # X, Y = torch.ones(1, max_seq_len, dtype=torch.int64).cuda(), torch.ones(1, max_seq_len, dtype=torch.int64).cuda()
     # determine and set the learning rate for this iteration
     lr = learning_rate
     
     for i in range(gradient_accumulation_steps-1):
         with model.no_sync():
-            with ctx:
-                loss = model(X, Y)
-        X, Y = next(train_batch_iter)
-        loss.backward()
-        
-    with model.no_sync():
-        with ctx:
             loss = model(X, Y)
-
-    X, Y = next(train_batch_iter)
+        # X, Y = next(train_batch_iter)
+        loss.backward()
+    with ctx:
+        loss = model(X, Y)
+    # X, Y = next(train_batch_iter)
     loss.backward()
+
+    # dic = []
+    # index = 0
+    # for n,p in model.named_parameters():
+    #         dic.append(p.grad.data.flatten().cpu().numpy())
+    #         print(n, index, index + p.data.numel())
+    #         index += p.data.numel()
+            
+    # array = np.array([])
+    # for a in dic:
+    #     array = np.append(array, a)
+    # np.savetxt("fsdp", array, fmt="%.4f", delimiter="\n")
+    # exit()
 
     optimizer.step()
     optimizer.zero_grad()
@@ -218,9 +235,8 @@ if enable_prof:
         prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + "/ddp-trace.json")
 
 
-t = np.mean(dts[2:])
+t = np.mean(dts[1:])
 if torch.distributed.get_rank() == 0:
-    print(t)
     output_statistics ("ddp", t, memory)
 
 dist.destroy_process_group()

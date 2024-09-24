@@ -6,7 +6,7 @@ from typing import  Optional, Tuple
 
 import numpy as np
 import torch
-import torch.distributed
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 import os
@@ -34,16 +34,16 @@ class RMSNorm(torch.nn.Module):
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
+    
     def forward(self, x):
-        output = self._norm(x.half()).type_as(x)
+        output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].half() / dim))
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).half()  # type: ignore
+    freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cos = torch.cos(freqs)  # real part
     freqs_sin = torch.sin(freqs)  # imaginary part
     return freqs_cos, freqs_sin
@@ -61,8 +61,8 @@ def apply_rotary_emb(
     xq: torch.Tensor, xk: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # reshape xq and xk to match the complex representation
-    xq_r, xq_i = xq.half().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
-    xk_r, xk_i = xk.half().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
+    xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
+    xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
 
     # reshape freqs_cos and freqs_sin for broadcasting
     freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
@@ -112,7 +112,6 @@ class Attention(nn.Module):
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
-        
         if not self.flash:
             print(
                 "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
@@ -220,6 +219,9 @@ class TransformerBlock(nn.Module):
     def forward_(self, x, freqs_cos, freqs_sin):
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
+
+
+
         return out
 
 
@@ -257,6 +259,7 @@ class Transformer(nn.Module):
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith("w3.weight") or pn.endswith("wo.weight"):
+                torch.manual_seed(1234)
                 torch.nn.init.normal_(
                     p, mean=0.0, std=0.02 / math.sqrt(2 * params.n_layers)
                 )
@@ -265,6 +268,7 @@ class Transformer(nn.Module):
         self.last_loss = None
 
     def _init_weights(self, module):
+        torch.manual_seed(1234)
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -282,6 +286,7 @@ class Transformer(nn.Module):
         freqs_sin = self.freqs_sin[:seqlen]
 
 
+        i = 0
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
         
@@ -449,49 +454,87 @@ class Transformer(nn.Module):
         print(f"wrote {filepath}")
 
 
-class Layer(nn.Module):
+
+class Model(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.config = config
-        self.decoders = nn.ModuleList()
+        self.embedding = nn.Embedding(config.vocab_size, config.dim)
 
+        self.decoders = nn.ModuleList()
         for i in range(config.n_layers):
             self.decoders.append(TransformerBlock(config))
 
+        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
+        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.dropout = nn.Dropout(config.dropout)
+        self.embedding.weight = self.output.weight
+        
         freqs_cos, freqs_sin = precompute_freqs_cis(
             config.dim // config.n_heads, config.max_seq_len
         )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
-        # init all weights
+         # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith("w3.weight") or pn.endswith("wo.weight"):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2))
-
-        self.enable_checkpointing = config.checkpointing
+                torch.manual_seed(1234)
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2*config.n_layers*dist.get_world_size()))
+        
     def _init_weights(self, module):
+        torch.manual_seed(1234)
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-    def forward(self, tokens):
+    
+    # only decoder forward
+    def decoder_forward(self, tokens):
         _bsz, seq_len, _ = tokens.shape
 
         freqs_cos = self.freqs_cos[:seq_len]
         freqs_sin = self.freqs_sin[:seq_len]
         h = tokens
 
-        # if self.enable_checkpointing:
-        #     for layer in self.decoders:
-        #         h = ckpt (layer, h, freqs_cos, freqs_sin, use_reentrant=True)
-        # else:
         for layer in self.decoders:
             h = layer(h, freqs_cos, freqs_sin)
             
         return h
+    
+    def forward(self, tokens):
+        return self.decoder_forward(tokens)
+
+# class Layer(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.config = config
+
+
+#         freqs_cos, freqs_sin = precompute_freqs_cis(
+#             config.dim // config.n_heads, config.max_seq_len
+#         )
+#         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+#         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+
+#         self.enable_checkpointing = config.checkpointing
+
+
+#     def forward(self, tokens):
+#         _bsz, seq_len, _ = tokens.shape
+
+#         freqs_cos = self.freqs_cos[:seq_len]
+#         freqs_sin = self.freqs_sin[:seq_len]
+#         h = tokens
+
+#         # if self.enable_checkpointing:
+#         #     for layer in self.decoders:
+#         #         h = ckpt (layer, h, freqs_cos, freqs_sin, use_reentrant=True)
+#         # else:
+#         for layer in self.decoders:
+#             h = layer(h, freqs_cos, freqs_sin)
+            
+#         return h

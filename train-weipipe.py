@@ -9,7 +9,7 @@ import tempfile
 import torch.distributed as dist
 import argparse
 from tinystories import Task
-from utils import get_lr, print_rank, output_statistics
+from utils import get_lr, print_rank, output_statistics, get_profiler
 from model import ModelArgs
 from torch.profiler import profile, record_function, ProfilerActivity
 import numpy as np
@@ -75,7 +75,6 @@ model_args = dict(
 print_rank(0, model_args)
 
 # microbatch size
-learning_rate = 1e-5
 
 model = WeiPipe(
     ModelArgs(**model_args),
@@ -111,11 +110,10 @@ def estimate_loss(model, eval_iters=20):
 
 
 if __name__ == "__main__":
-    learning_rate = 5e-4
+    learning_rate = 1e-3
     torch.manual_seed(1234)
 
     train_batch_iter = iter_batches("train")
-    # X, Y = next(train_batch_iter)
 
     iter_num = 0
     start = time.time()
@@ -124,12 +122,7 @@ if __name__ == "__main__":
     
     enable_prof = bool(int(os.environ["PROF"]))
     if enable_prof:
-        prof = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
-            record_shapes=False,
-            with_stack=False,
-            # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        )
+        prof = get_profiler()
         prof.start()
     
     dts = []
@@ -138,41 +131,39 @@ if __name__ == "__main__":
         if enable_prof:
             prof.step()
             
-        lr = get_lr(learning_rate, iter_num)
+        # lr = get_lr(learning_rate, iter_num)
+        lr = learning_rate
         model.set_lr(lr)
 
         loss = model.forward_backward_step(train_batch_iter)
         # print(prof.key_averages().table(sort_by="cuda_time"))
 
         loss_rank = 0
-
+        loss = loss.item()
         dt = time.time() - start
         dts.append(dt * 1000)
+        start = time.time() 
 
-        start = time.time()
-        # loss = loss.item()
-        if iter_num % 1 == 0 and dist.get_rank() == loss_rank:
+        # if iter_num % 1 == 0 and dist.get_rank() == loss_rank:
             # get loss as float, scale up due to the divide above. note: this is a CPU-GPU sync point
             # print(
             #     f"{iter_num} | loss {loss:.4f} | lr {lr:e} | time {dt*1000 :.2f}ms",
             # )
-            memory = torch.cuda.max_memory_allocated() / 1024**3
-            
+        memory = torch.cuda.max_memory_allocated() / 1024**3
+        
+        if dist.get_rank() == 0:
             print(
-                f"{iter_num} | time {dt*1000 :.2f}ms | memory {memory:.2f} G",
+                f"{iter_num} | rank: {dist.get_rank()}   loss {loss:.4f} | time {dt*1000 :.2f}ms | memory {memory:.2f} G",
             )
-
-
         iter_num += 1
         
     if enable_prof:
         prof.stop()
-        if dist.get_rank() == 0:
-            prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + "/weipipe-trace.json")
+        prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + f"/weipipe-trace-{dist.get_rank()}.json")
 
-    t = np.mean(dts[1:])
     if dist.get_rank() == 0:
+        t = np.mean(dts[2:])
+        print(t)
         output_statistics("weipipe", t, memory)
 
-    dist.barrier()
     dist.destroy_process_group()
