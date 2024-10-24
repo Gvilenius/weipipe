@@ -119,7 +119,7 @@ model_args = dict(
     n_layers=n_layers,
     n_heads=n_heads,
     n_kv_heads=None,
-    vocab_size=32000,
+    vocab_size=32,
     multiple_of=multiple_of,
     max_seq_len=max_seq_len,
     dropout=dropout,
@@ -203,6 +203,9 @@ if enable_prof:
     prof.start()
 
 
+X = torch.randint(0, gptconf.vocab_size,(micro_batch_size, gptconf.max_seq_len)).cuda()
+Y = torch.randint(0, gptconf.vocab_size,(micro_batch_size, gptconf.max_seq_len)).cuda()
+
 while iter_num < max_iters:
     if enable_prof:
         prof.step()
@@ -212,7 +215,7 @@ while iter_num < max_iters:
         model.backward(loss)
         model.step()
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = next(train_batch_iter)
+        # X, Y = next(train_batch_iter)
 
     # timing and logging
     lossf = loss.item()

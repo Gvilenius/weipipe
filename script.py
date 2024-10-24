@@ -37,16 +37,16 @@ def init_env(ngpu, nnode):
 # model args
 set_env("HIDDEN_SIZE", 1024) 
 set_env("ATTENTION_HEADS", 16)
-set_env("SEQ_LEN", 512)
+set_env("SEQ_LEN", 2048)
 
 
 # training args
-set_env("MICRO_BATCH_SIZE", 8)
-set_env("ACC_STEP", 1)
+set_env("MICRO_BATCH_SIZE", 16)
+set_env("ACC_STEP", 16)
 
 set_env("CHECKPOINTING", 1)
-set_env("TRAIN_EMBEDDING", 0)
-set_env("EXIT_INTERVAL", 5)
+set_env("TRAIN_EMBEDDING", 1)
+set_env("EXIT_INTERVAL", 3)
 
 set_env("PROF", 0)
 
@@ -90,8 +90,10 @@ def run_single(algo, ngpu_per_node, nnode):
     #         "cd ../zero-bubble-pipeline-parallelism && bash examples/pretrain_zero_bubble.sh"
     #     )
     elif os.environ["ALGO"] == "ds":
+        set_env("CHECKPOINTING", 1)
         cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-ds.py"
     elif os.environ["ALGO"] == "wei":
+        set_env("CHECKPOINTING", 0)
         cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-weipipe.py"
     elif os.environ["ALGO"] == "fsdp":
         cmd = f"torchrun --nproc-per-node={ngpu_per_node} --master-addr={master_addr} --master-port={master_port} --nnodes={nnode} --node-rank={rank} train-fsdp.py"

@@ -64,33 +64,34 @@ model_args = dict(
     dim=dim,
     n_heads=n_heads,
     n_kv_heads=None,
-    vocab_size=32000,
+    vocab_size=4,
     multiple_of=32,
     max_seq_len=max_seq_len,
     dropout=0.0,
     n_layers = n_layers,
     checkpointing=checkpointing,
+    train_embedding = train_embedding
 )
 
 print_rank(0, model_args)
 
 # microbatch size
-
-model = WeiPipe(
-    ModelArgs(**model_args),
-    gradient_accumulation_steps=gradient_accumulation_steps,
-    train_embedding=train_embedding,
-)
-
-eval_interval = 500
 iter_batches = partial(
     Task.iter_batches,
     batch_size=micro_batch_size,
     max_seq_len=max_seq_len,
     device="cuda",
-    num_workers=0,
+    num_workers=2,
 )
+train_batch_iter = iter_batches("train")
 
+model = WeiPipe(
+    ModelArgs(**model_args),
+    gradient_accumulation_steps=gradient_accumulation_steps,
+    train_embedding=train_embedding,
+    dl_iter=train_batch_iter,
+    batch_size = micro_batch_size
+)
 
 @torch.no_grad()
 def estimate_loss(model, eval_iters=20):
@@ -111,14 +112,12 @@ def estimate_loss(model, eval_iters=20):
 
 if __name__ == "__main__":
     learning_rate = 1e-3
+    model.set_lr(learning_rate)
     torch.manual_seed(1234)
-
-    train_batch_iter = iter_batches("train")
 
     iter_num = 0
     start = time.time()
     n_total_samples = 0
-
     
     enable_prof = bool(int(os.environ["PROF"]))
     if enable_prof:
@@ -127,19 +126,14 @@ if __name__ == "__main__":
     
     dts = []
     while iter_num < iters_num:
-        
+
         if enable_prof:
-            prof.step()
+                prof.step()
             
-        # lr = get_lr(learning_rate, iter_num)
-        lr = learning_rate
-        model.set_lr(lr)
-
-        loss = model.forward_backward_step(train_batch_iter)
-        # print(prof.key_averages().table(sort_by="cuda_time"))
-
-        loss_rank = 0
+        loss = model.forward_backward_step()
         loss = loss.item()
+  
+            
         dt = time.time() - start
         dts.append(dt * 1000)
         start = time.time() 
@@ -157,13 +151,15 @@ if __name__ == "__main__":
             )
         iter_num += 1
         
+
+            
     if enable_prof:
         prof.stop()
-        prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + f"/weipipe-trace-{dist.get_rank()}.json")
+        prof.export_chrome_trace(os.environ["WEIPIPE_DIR"]  + f"/result/weipipe-trace-{dist.get_rank()}.json")
 
     if dist.get_rank() == 0:
         t = np.mean(dts[2:])
         print(t)
         output_statistics("weipipe", t, memory)
 
-    dist.destroy_process_group()
+    model.destroy()

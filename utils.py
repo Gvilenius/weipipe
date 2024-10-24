@@ -102,9 +102,9 @@ def loss_fn(y_, y):
 
 def get_profiler():
     return torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=2, repeat=1),
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
             record_shapes=False,
-            with_stack=False,
+            with_stack=True,
             # activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
         )
 

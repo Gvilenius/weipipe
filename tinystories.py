@@ -143,7 +143,6 @@ class PretokDataset(torch.utils.data.IterableDataset):
 
 
 class Task:
-
     @staticmethod
     def iter_batches(split, batch_size, max_seq_len, device, num_workers=0):
         ds = PretokDataset(split, max_seq_len)

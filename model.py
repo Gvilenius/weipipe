@@ -24,6 +24,7 @@ class ModelArgs:
     max_seq_len: int = 2048
     dropout: float = 0.0
     checkpointing: bool = False
+    train_embedding: bool = False
 
 
 class RMSNorm(torch.nn.Module):
@@ -469,6 +470,10 @@ class Model(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         self.embedding.weight = self.output.weight
         
+        if not config.train_embedding:
+            self.embedding.weight.requires_grad = False
+            self.norm.weight.requires_grad = False
+            
         freqs_cos, freqs_sin = precompute_freqs_cis(
             config.dim // config.n_heads, config.max_seq_len
         )
@@ -507,34 +512,3 @@ class Model(nn.Module):
     
     def forward(self, tokens):
         return self.decoder_forward(tokens)
-
-# class Layer(nn.Module):
-#     def __init__(self, config):
-#         super().__init__()
-#         self.config = config
-
-
-#         freqs_cos, freqs_sin = precompute_freqs_cis(
-#             config.dim // config.n_heads, config.max_seq_len
-#         )
-#         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
-#         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
-
-#         self.enable_checkpointing = config.checkpointing
-
-
-#     def forward(self, tokens):
-#         _bsz, seq_len, _ = tokens.shape
-
-#         freqs_cos = self.freqs_cos[:seq_len]
-#         freqs_sin = self.freqs_sin[:seq_len]
-#         h = tokens
-
-#         # if self.enable_checkpointing:
-#         #     for layer in self.decoders:
-#         #         h = ckpt (layer, h, freqs_cos, freqs_sin, use_reentrant=True)
-#         # else:
-#         for layer in self.decoders:
-#             h = layer(h, freqs_cos, freqs_sin)
-            
-#         return h

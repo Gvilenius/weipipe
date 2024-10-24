@@ -120,16 +120,17 @@ class WeiPipe:
     def __init__(self, config, gradient_accumulation_steps=1, train_embedding=False, dtype=torch.float16, dl_iter=None, batch_size=8):
         # Setup world info
         self.backward_stream = torch.cuda.Stream()
-        self.forward_stream = torch.cuda.Stream(priority=-999)
         self.data_stream = torch.cuda.Stream()
         self.batch_size = batch_size
         self.enable_checkpointing = config.checkpointing
         self.dl_iter = dl_iter
         
         # self.get_data()
+
         
         self.train_embedding = train_embedding
 
+        
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         self.dtype = dtype
@@ -160,6 +161,7 @@ class WeiPipe:
         self.loss_fn = loss_fn
         self.activations = ActivationBuffer()
         self.grad = None
+        # trainable_modules = nn.ModuleList ([self.model_32.decoders, self.model_32.norm])
         
         if train_embedding:
             trainable_modules = self.model_32
@@ -172,17 +174,22 @@ class WeiPipe:
         self.counter = {}
         self.gradient_accumulation_steps = gradient_accumulation_steps
 
-        self.pg = [torch.distributed.new_group(backend="nccl") for _ in range (4)]
+        self.pg0 = torch.distributed.new_group(backend="nccl")
+        self.pg1 = torch.distributed.new_group(backend="nccl")
+        
+        self.warmup_pg = [torch.distributed.new_group(ranks=[0,1], backend="nccl"), torch.distributed.new_group(ranks=[0,1,2],backend="nccl")]
 
         self.n_forward = 0
         self.n_backward = 0
+        self.first = True
         
     def destroy(self):
         dist.destroy_process_group()
 
         
     def send_recv(self, ops):
-        return dist.batch_isend_irecv(ops)
+        req = dist.batch_isend_irecv(ops)
+        return req
     
     def flatten_weight(self):
         i = 0
@@ -199,23 +206,6 @@ class WeiPipe:
             copy_weights(self.model_32.norm, self.model_16.norm)
             
     # ring exchange
-
-    def direct_send_recv(self, idx, reverse, process_group=None):
-        prev_rank = (self.rank + self.world_size - 1) % self.world_size
-        next_rank = (self.rank + 1) % self.world_size
-        if reverse:
-            prev_rank, next_rank = next_rank, prev_rank
-
-        buffer = self.buffers[idx]
-        if self.rank % 2 == 0:
-            send = dist.isend (buffer.send, next_rank, process_group)
-            recv = dist.irecv (buffer.recv, prev_rank, process_group)
-        else:
-            recv = dist.irecv (buffer.recv, prev_rank, process_group)
-            send = dist.isend (buffer.send, next_rank, process_group)
-
-        return [recv, send]
-    
     def flow_op(self, idx, reverse, process_group=None):
         prev_rank = (self.rank + self.world_size - 1) % self.world_size
         next_rank = (self.rank + 1) % self.world_size
@@ -223,20 +213,30 @@ class WeiPipe:
             prev_rank, next_rank = next_rank, prev_rank
 
         buffer = self.buffers[idx]
+        
+        # if self.first:
+        #     self.first = False
+        #     prev_rank = 1-self.rank
+        #     next_rank = 1-self.rank
+        #     process_group = self.warmup_pg[0]
+        
         if self.rank % 2 == 0:
             send_op = dist.P2POp(dist.isend, buffer.send, next_rank, group=process_group)
             recv_op = dist.P2POp(dist.irecv, buffer.recv, prev_rank, group=process_group)
             ops = [send_op, recv_op]
-            return ops
         else:
             recv_op = dist.P2POp(dist.irecv, buffer.recv, prev_rank, group=process_group)
             send_op = dist.P2POp(dist.isend, buffer.send, next_rank, group=process_group)
             ops = [recv_op, send_op]
+        
+
         return ops
-            
+    
+
     def weight_flow(self, idx, reverse):
         if self.world_size == 1:
             return
+        
         
         weight_buffer = self.buffers[f"weight{idx}"]
         weight_buffer.send.copy_(weight_buffer.recv)
@@ -245,24 +245,25 @@ class WeiPipe:
             i = 0
             for p in params(self.model_32.decoders):
                 n = p.data.numel()
-                self.buffers["weight0"].recv[i : i + n] = p.data.view(-1)
+                self.buffers["weight0"].recv[i : i + n] = p.data.view(-1).to(self.dtype)
                 i += n
             return
-        # elif (idx == 1 and self.n_backward % self.world_size == 0):
-        #     i = 0
-        #     for p in params(self.model_32.decoders):
-        #         n = p.data.numel()
-        #         self.buffers["weight1"].recv[i : i + n] = p.data.view(-1).to(self.dtype)
-        #         i += n
-        #     return
+        elif (idx == 1 and self.n_backward % self.world_size == 0):
+            i = 0
+            for p in params(self.model_32.decoders):
+                n = p.data.numel()
+                self.buffers["weight1"].recv[i : i + n] = p.data.view(-1).to(self.dtype)
+                i += n
+            return
         else:
-            process_group = self.pg[(self.n_forward + self.n_backward) % 2]
-        
+            process_group = self.pg0 if idx == 0 else self.pg1
+            # process_group=None
             weight_flow_op = self.flow_op(f"weight{idx}", reverse, process_group=process_group)
-            return self.send_recv(weight_flow_op)
-    
-            # return self.direct_send_recv (f"weight{idx}", reverse, process_group=process_group)
-    
+            
+            req = self.send_recv(weight_flow_op)
+
+            return req
+
     def grad_swap(self):
         """At the end, swap grad between rank i and rank n-i"""
         dst_rank = (self.world_size + 1 - self.rank) % self.world_size
@@ -277,17 +278,16 @@ class WeiPipe:
             return  self.send_recv([recv_op, send_op])
     
     def _forward(self, compute=False):
-        # with torch.cuda.stream (self.forward_stream):
-            n = self.gradient_accumulation_steps * self.world_size + self.world_size-1
-            self.n_forward = (self.n_forward + 1) % n
+        n = self.gradient_accumulation_steps * self.world_size + self.world_size-1
+        self.n_forward = (self.n_forward + 1) % n
+        
+        wait(self.reqs, 0)
+        
+        if self.n_forward > 0:
+            self.reqs[0] = self.weight_flow(0, reverse=False)
             
-            wait(self.reqs, 0)
-            
-            if self.n_forward > 0:
-                self.reqs[0] = self.weight_flow(0, reverse=False) 
-                
-            if compute:
-                self.forward_step()
+        if compute:
+            self.forward_step()
 
     def _backward(self, compute=False):
         # with torch.cuda.stream (self.backward_stream):
@@ -313,8 +313,7 @@ class WeiPipe:
         x = self.activations.top()
         x.retain_grad()
 
-        bind_flatten(self.model_16.decoders, self.buffers["weight0"].send)
-        
+        bind_flatten(self.model_16.decoders, self.buffers["weight1"].send)
         ctx = nullcontext() if self.enable_checkpointing else torch.no_grad()
         
         with ctx:
@@ -327,7 +326,6 @@ class WeiPipe:
         bind_flatten(self.model_16.decoders, self.buffers["weight1"].send)
         outputs = self.activations.pop()
         inputs = self.activations.pop()
-        
         # recomputation
         if not self.enable_checkpointing:
             outputs = self.model_16(inputs)
@@ -359,12 +357,16 @@ class WeiPipe:
 
     
     def get_data(self):
-        if self.X is None:
-            self.X = torch.randint(0, self.config.vocab_size,(self.batch_size, self.config.seq_len)).cuda()
-            self.Y = torch.randint(0,self.config.vocab_size,(self.batch_size, self.config.seq_len)).cuda()
+        # with torch.cuda.stream(self.data_stream):
+            # self.X, self.Y_ = next(self.dl_iter)
+            # print(self.X.shape)
+            if self.X is None:
+                self.X = torch.randint(0,32,(self.batch_size, self.config.seq_len)).cuda()
+                self.Y = torch.randint(0,32,(self.batch_size, self.config.seq_len)).cuda()
         
     def forward_backward_step(self):
         self.i = 0
+        self.first = True
         self.print_string = f"rank{self.rank}: "
         
         x = self.preprocess(self.X)
